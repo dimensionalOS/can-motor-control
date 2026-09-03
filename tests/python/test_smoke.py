@@ -62,6 +62,8 @@ def test_imports():
         assert not hasattr(can_motor_control, "GsUsbBus")
     elif sys.platform == "darwin":
         assert can_motor_control.GsUsbBus is not None
+        assert can_motor_control.GsUsbDeviceInfo is not None
+        assert callable(can_motor_control.list_gs_usb_devices)
         assert not hasattr(can_motor_control, "SocketCanBus")
         for counter in ("rx_received", "rx_dropped", "tx_accepted", "tx_completed"):
             assert hasattr(can_motor_control.GsUsbBus, counter)
@@ -81,6 +83,14 @@ def test_macos_gs_usb_constructor_rejects_contradictory_selector_without_hardwar
             serial_number="adapter",
             index=0,
         )
+
+
+def test_macos_gs_usb_device_listing_without_matching_hardware():
+    if sys.platform != "darwin":
+        return
+    assert (
+        can_motor_control.list_gs_usb_devices(vendor_id=0xFFFF, product_id=0xFFFF) == []
+    )
 
 
 def test_macos_gs_usb_readiness_wait_releases_gil():

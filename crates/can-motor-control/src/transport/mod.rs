@@ -15,7 +15,7 @@ mod socketcan;
 #[cfg(target_os = "macos")]
 pub use gs_usb::GsUsbStatistics;
 #[cfg(target_os = "macos")]
-pub use gs_usb::{GsUsbBus, GsUsbConfig};
+pub use gs_usb::{list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo};
 pub use mock::{MockCanBus, MockRecordedCall};
 pub use poller::BusPoller;
 #[cfg(target_os = "linux")]

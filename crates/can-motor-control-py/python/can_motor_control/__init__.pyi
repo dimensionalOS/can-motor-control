@@ -35,6 +35,20 @@ if sys.platform == "linux":
     class SocketCanBus:
         def __init__(self, interface: str, fd: bool = False) -> None: ...
 elif sys.platform == "darwin":
+    class GsUsbDeviceInfo:
+        @property
+        def index(self) -> int: ...
+        @property
+        def vendor_id(self) -> int: ...
+        @property
+        def product_id(self) -> int: ...
+        @property
+        def serial_number(self) -> str | None: ...
+
+    def list_gs_usb_devices(
+        *, vendor_id: int, product_id: int
+    ) -> list[GsUsbDeviceInfo]: ...
+
     class GsUsbBus:
         def __init__(
             self,

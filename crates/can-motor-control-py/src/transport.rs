@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
 use can_motor_control::SocketCanBus;
-use can_motor_control::{CanBus, MockCanBus};
 #[cfg(target_os = "macos")]
-use can_motor_control::{GsUsbBus, GsUsbConfig, GsUsbStatistics};
+use can_motor_control::{
+    list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo, GsUsbStatistics,
+};
+use can_motor_control::{CanBus, MockCanBus};
 use pyo3::prelude::*;
 
 use crate::errors::transport_to_pyerr;
@@ -96,6 +98,45 @@ impl PySocketCanBus {
             handle: TransportHandle::new(bus),
         })
     }
+}
+
+/// A discovered macOS gs_usb adapter.
+#[cfg(target_os = "macos")]
+#[pyclass(name = "GsUsbDeviceInfo", module = "can_motor_control", frozen)]
+pub struct PyGsUsbDeviceInfo {
+    #[pyo3(get)]
+    pub index: usize,
+    #[pyo3(get)]
+    pub vendor_id: u16,
+    #[pyo3(get)]
+    pub product_id: u16,
+    #[pyo3(get)]
+    pub serial_number: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+impl From<GsUsbDeviceInfo> for PyGsUsbDeviceInfo {
+    fn from(device: GsUsbDeviceInfo) -> Self {
+        Self {
+            index: device.index,
+            vendor_id: device.vendor_id,
+            product_id: device.product_id,
+            serial_number: device.serial_number,
+        }
+    }
+}
+
+/// List macOS gs_usb adapters matching a USB vendor/product pair.
+#[cfg(target_os = "macos")]
+#[pyfunction(name = "list_gs_usb_devices", signature = (*, vendor_id, product_id))]
+pub fn py_list_gs_usb_devices(
+    py: Python<'_>,
+    vendor_id: u16,
+    product_id: u16,
+) -> PyResult<Vec<PyGsUsbDeviceInfo>> {
+    py.allow_threads(|| list_gs_usb_devices(vendor_id, product_id))
+        .map(|devices| devices.into_iter().map(Into::into).collect())
+        .map_err(transport_to_pyerr)
 }
 
 /// A classical-CAN bus backed by a gs_usb adapter through native macOS IOKit.

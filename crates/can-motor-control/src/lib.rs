@@ -29,9 +29,9 @@ pub use robot::{Robot, RobotBuilder};
 pub use spec::{GripperOpeningSpec, GroupSpecKind, MotorSpec, OpeningDirection};
 #[cfg(target_os = "linux")]
 pub use transport::SocketCanBus;
-pub use transport::{BusPoller, CanBus, MockCanBus, MockRecordedCall, TransportError};
 #[cfg(target_os = "macos")]
-pub use transport::{GsUsbBus, GsUsbConfig, GsUsbStatistics};
+pub use transport::{list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo, GsUsbStatistics};
+pub use transport::{BusPoller, CanBus, MockCanBus, MockRecordedCall, TransportError};
 
 // Re-export can-motor-codec public types so users have a single import surface.
 pub use motor_codec::{

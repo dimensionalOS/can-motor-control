@@ -36,6 +36,15 @@ let bus = GsUsbBus::open(config)?;
 # Ok::<(), can_motor_control::TransportError>(())
 ```
 
+List matching adapters before opening one:
+
+```python
+from can_motor_control import list_gs_usb_devices
+
+for device in list_gs_usb_devices(vendor_id=0x1D50, product_id=0x606F):
+    print(device.index, device.serial_number)
+```
+
 Choose either `serial_number` or `index`. If you omit both, the transport uses
 index zero. USB enumeration order can change after reconnects and reboots, so
 use a serial number for a fixed deployment. Duplicate serial numbers fail as

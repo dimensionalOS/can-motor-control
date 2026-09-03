@@ -9,7 +9,7 @@ mod worker_core;
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{GsUsbBus, GsUsbConfig};
+pub use macos::{list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo};
 #[cfg(target_os = "macos")]
 pub use worker_core::GsUsbStatistics;
 

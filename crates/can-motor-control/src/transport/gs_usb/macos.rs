@@ -46,6 +46,37 @@ const BREQ_DEVICE_CONFIG: u8 = 5;
 const MODE_RESET: u32 = 0;
 const MODE_START: u32 = 1;
 
+/// One macOS gs_usb adapter returned by [`list_gs_usb_devices`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GsUsbDeviceInfo {
+    /// Enumeration index accepted by [`GsUsbConfig::index`].
+    pub index: usize,
+    /// USB vendor identifier.
+    pub vendor_id: u16,
+    /// USB product identifier.
+    pub product_id: u16,
+    /// Stable USB serial number, when the adapter firmware provides one.
+    pub serial_number: Option<String>,
+}
+
+/// List macOS gs_usb adapters matching a USB vendor/product pair.
+pub fn list_gs_usb_devices(
+    vendor_id: u16,
+    product_id: u16,
+) -> Result<Vec<GsUsbDeviceInfo>, TransportError> {
+    let devices = nusb::list_devices().wait().map_err(discovery_error)?;
+    Ok(devices
+        .filter(|device| device.vendor_id() == vendor_id && device.product_id() == product_id)
+        .enumerate()
+        .map(|(index, device)| GsUsbDeviceInfo {
+            index,
+            vendor_id: device.vendor_id(),
+            product_id: device.product_id(),
+            serial_number: device.serial_number().map(str::to_owned),
+        })
+        .collect())
+}
+
 /// Configuration for opening one macOS gs_usb adapter.
 #[derive(Clone, Debug)]
 pub struct GsUsbConfig {
@@ -740,6 +771,13 @@ fn classify_nusb_error(error: nusb::Error) -> InitFailure {
         ErrorKind::Disconnected | ErrorKind::NotFound => InitFailure::Transient(error.to_string()),
         ErrorKind::PermissionDenied => InitFailure::Terminal(TransportError::PermissionDenied),
         _ => InitFailure::Terminal(TransportError::Io(io::Error::from(error))),
+    }
+}
+
+fn discovery_error(error: nusb::Error) -> TransportError {
+    match error.kind() {
+        ErrorKind::PermissionDenied => TransportError::PermissionDenied,
+        _ => TransportError::Io(io::Error::from(error)),
     }
 }
 

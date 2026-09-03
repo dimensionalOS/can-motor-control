@@ -22,7 +22,7 @@ from can_motor_control._native import (
 if sys.platform == "linux":
     from can_motor_control._native import SocketCanBus
 elif sys.platform == "darwin":
-    from can_motor_control._native import GsUsbBus
+    from can_motor_control._native import GsUsbBus, GsUsbDeviceInfo, list_gs_usb_devices
 
 try:
     from can_motor_control._native import MockFeedbackCodec
@@ -52,7 +52,7 @@ __all__ = [
 if sys.platform == "linux":
     __all__.append("SocketCanBus")
 elif sys.platform == "darwin":
-    __all__.append("GsUsbBus")
+    __all__.extend(["GsUsbBus", "GsUsbDeviceInfo", "list_gs_usb_devices"])
 
 if MockFeedbackCodec is not None:
     __all__.append("MockFeedbackCodec")
