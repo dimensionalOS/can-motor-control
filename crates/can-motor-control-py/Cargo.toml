@@ -16,6 +16,7 @@ doc = false
 
 [dependencies]
 can-motor-control = { workspace = true }
+robstride-codec = { workspace = true, features = ["std"] }
 damiao-codec = { workspace = true, features = ["std"] }
 motor-codec = { workspace = true, features = ["std"] }
 pyo3 = { workspace = true }

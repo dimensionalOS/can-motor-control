@@ -93,3 +93,7 @@ impl DamiaoCodecExt for DamiaoCodec { ... }
 
 Callers reach the extension via downcast on the trait object. The
 downcast returns `Some(...)` for matching vendor, `None` otherwise.
+
+## RobStride model binding
+
+The RobStride codec is implemented in `crates/robstride-codec`. The common trait now includes `bind_motor`, whose default does nothing for stateless codecs. Robot connection calls it for every configured motor before receiving frames. RobStride needs this table because its status packet identifies the device but does not identify the model. Python exposes the codec and model enum and registers the vendor in its configuration loader. See [the protocol guide](robstride.md) for routing and supported modes.

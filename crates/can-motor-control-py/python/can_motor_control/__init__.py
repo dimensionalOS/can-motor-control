@@ -29,7 +29,7 @@ try:
 except ImportError:
     MockFeedbackCodec = None  # type: ignore[assignment]
 
-from can_motor_control import damiao
+from can_motor_control import damiao, robstride
 
 __all__ = [
     "CanFrame",
@@ -47,6 +47,7 @@ __all__ = [
     "ConfigError",
     "LifecycleError",
     "damiao",
+    "robstride",
 ]
 
 if sys.platform == "linux":

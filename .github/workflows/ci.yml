@@ -120,6 +120,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p can-motor-codec --no-default-features --target thumbv7em-none-eabihf
       - run: cargo build -p can-motor-damiao-codec --no-default-features --target thumbv7em-none-eabihf
+      - run: cargo build -p can-motor-robstride-codec --no-default-features --target thumbv7em-none-eabihf
 
   vendor_isolation:
     name: can-motor-control has no vendor dep
@@ -130,7 +131,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Confirm no vendor codec in can-motor-control runtime tree
         run: |
-          if cargo tree -p can-motor-control --edges normal | grep -E '\bcan-motor-damiao-codec\b|\brobostride\b|\bmyactuator\b'; then
+          if cargo tree -p can-motor-control --edges normal | grep -E '\bcan-motor-damiao-codec\b|\bcan-motor-robstride-codec\b|\brobostride\b|\bmyactuator\b'; then
             echo "::error::vendor codec leaked into can-motor-control runtime dependencies"
             exit 1
           fi

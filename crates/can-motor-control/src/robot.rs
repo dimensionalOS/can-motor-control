@@ -103,6 +103,14 @@ impl Robot {
                             attempted: key,
                         });
                     }
+                    bus.codec
+                        .bind_motor(motor_codec::MotorRef {
+                            motor_type: motor.motor_type(),
+                            send_id: motor.send_id(),
+                            recv_id: motor.recv_id(),
+                            name: motor.name(),
+                        })
+                        .map_err(Error::Codec)?;
                     bus.routes.insert(motor.recv_id(), key);
                 }
             }

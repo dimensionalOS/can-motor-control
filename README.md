@@ -1,6 +1,6 @@
 # can-motor-control
 
-Rust control library for Damiao-family CAN motors, with first-class Python bindings.
+Rust control library for Damiao and RobStride CAN motors, with Python bindings.
 
 ## Status
 
@@ -133,3 +133,7 @@ Homebrew libusb, PyUSB, or Python gs_usb package.
 ## License
 
 Dual-licensed under Apache-2.0 OR MIT.
+
+## RobStride
+
+RS00 and RS06 support is documented in [the RobStride guide](docs/robstride.md). Commands and decoding run in Rust through the existing transport. Hardware qualification and target host control timing remain required before use on an arm.

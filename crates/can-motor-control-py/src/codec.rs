@@ -209,3 +209,38 @@ impl From<PyMotorType> for MotorTypeId {
         dm.into()
     }
 }
+
+/// RobStride classical CAN codec with one host address per bus.
+#[pyclass(name = "RobstrideCodec", module = "can_motor_control.robstride")]
+pub struct PyRobstrideCodec {
+    pub(crate) handle: CodecHandle,
+}
+#[pymethods]
+impl PyRobstrideCodec {
+    /// Construct without opening CAN or sending commands.
+    #[new]
+    #[pyo3(signature = (host_id=0xFD))]
+    fn new(host_id: u8) -> Self {
+        Self {
+            handle: CodecHandle::new(robstride_codec::RobstrideCodec::with_host_id(host_id)),
+        }
+    }
+}
+/// RobStride models supported by the pinned protocol profile.
+#[pyclass(
+    name = "RobstrideMotorType",
+    module = "can_motor_control.robstride",
+    eq,
+    eq_int,
+    frozen
+)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum PyRobstrideMotorType {
+    RS00 = 0,
+    RS06 = 6,
+}
+impl From<PyRobstrideMotorType> for MotorTypeId {
+    fn from(value: PyRobstrideMotorType) -> Self {
+        Self::Robostride(value as u16)
+    }
+}
