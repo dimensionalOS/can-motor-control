@@ -15,7 +15,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyList};
 
-use crate::codec::{PyDamiaoCodec, PyMockFeedbackCodec};
+use crate::codec::{PyDamiaoCodec, PyMockFeedbackCodec, PyRobstrideCodec};
 use crate::errors::into_pyerr;
 use crate::spec::PyMotorSpec;
 #[cfg(target_os = "macos")]
@@ -741,11 +741,13 @@ impl PyRobotBuilder {
             .ok_or_else(|| PyTypeError::new_err(ACCEPTED_TRANSPORTS))?;
         let codec_handle = if let Ok(dm) = codec.extract::<PyRef<'_, PyDamiaoCodec>>() {
             dm.handle.clone()
+        } else if let Ok(rs) = codec.extract::<PyRef<'_, PyRobstrideCodec>>() {
+            rs.handle.clone()
         } else if let Ok(mock) = codec.extract::<PyRef<'_, PyMockFeedbackCodec>>() {
             mock.handle.clone()
         } else {
             return Err(PyTypeError::new_err(
-                "codec must be DamiaoCodec or MockFeedbackCodec",
+                "codec must be DamiaoCodec, RobstrideCodec or MockFeedbackCodec",
             ));
         };
         let transport = transport_handle
@@ -875,6 +877,11 @@ impl PyRobot {
                 DAMIAO_VENDOR,
                 || Box::new(DamiaoCodec::new()),
                 dm_parse_type,
+            );
+            reg.register(
+                robstride_codec::VENDOR_NAME,
+                || Box::new(robstride_codec::RobstrideCodec::new()),
+                robstride_codec::parse_motor_type,
             );
             Robot::from_config(&path, &reg)
         });

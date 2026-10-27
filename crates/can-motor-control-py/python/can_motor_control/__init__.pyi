@@ -7,6 +7,7 @@ import sys
 from typing import Any, ClassVar
 
 import numpy as np
+from . import damiao, robstride
 
 class DmError(Exception): ...
 class TransportError(DmError): ...
@@ -73,7 +74,7 @@ class MockFeedbackCodec:
     def __init__(self, recv_id: int) -> None: ...
 
 class MotorSpec:
-    def __init__(self, name: str, type: int, send_id: int, recv_id: int) -> None: ...
+    def __init__(self, name: str, type: damiao.MotorType | robstride.MotorType, send_id: int, recv_id: int) -> None: ...
 
 class Motor:
     name: str

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/motor-codec",
     "crates/damiao-codec",
+    "crates/robstride-codec",
     "crates/can-motor-control",
     "crates/can-motor-control-py",
 ]
@@ -29,6 +30,7 @@ nusb = "=0.2.5"
 
 motor-codec = { path = "crates/motor-codec", package = "can-motor-codec", version = "0.1.0", default-features = false }
 damiao-codec = { path = "crates/damiao-codec", package = "can-motor-damiao-codec", version = "0.1.0", default-features = false }
+robstride-codec = { path = "crates/robstride-codec", package = "can-motor-robstride-codec", version = "0.1.0", default-features = false }
 can-motor-control = { path = "crates/can-motor-control", version = "0.1.0" }
 
 [profile.release]

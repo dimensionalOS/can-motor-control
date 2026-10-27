@@ -24,5 +24,6 @@ log = { workspace = true }
 nusb = { workspace = true }
 
 [dev-dependencies]
+robstride-codec = { workspace = true, features = ["std"] }
 damiao-codec = { workspace = true, features = ["std"] }
 nusb = { workspace = true }

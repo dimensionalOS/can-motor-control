@@ -28,6 +28,7 @@ version = "0.1.0"
 dependencies = [
  "can-motor-codec",
  "can-motor-damiao-codec",
+ "can-motor-robstride-codec",
  "libc",
  "log",
  "mio",
@@ -44,6 +45,7 @@ dependencies = [
  "can-motor-codec",
  "can-motor-control",
  "can-motor-damiao-codec",
+ "can-motor-robstride-codec",
  "log",
  "numpy",
  "pyo3",
@@ -52,6 +54,13 @@ dependencies = [
 
 [[package]]
 name = "can-motor-damiao-codec"
+version = "0.1.0"
+dependencies = [
+ "can-motor-codec",
+]
+
+[[package]]
+name = "can-motor-robstride-codec"
 version = "0.1.0"
 dependencies = [
  "can-motor-codec",

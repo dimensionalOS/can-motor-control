@@ -1,0 +1,24 @@
+[bus.main]
+kind = "socketcan"
+interface = "can1"
+fd = false
+vendor = "robstride"
+
+[[group]]
+name = "arm"
+kind = "arm"
+bus = "main"
+motors = [
+  { name = "joint1", type = "RS06", send_id = 1, recv_id = 1 },
+  { name = "joint2", type = "RS06", send_id = 2, recv_id = 2 },
+  { name = "joint3", type = "RS06", send_id = 3, recv_id = 3 },
+  { name = "joint4", type = "RS00", send_id = 4, recv_id = 4 },
+  { name = "joint5", type = "RS00", send_id = 5, recv_id = 5 },
+  { name = "joint6", type = "RS00", send_id = 6, recv_id = 6 },
+ ]
+
+[[group]]
+name = "gripper"
+kind = "gripper"
+bus = "main"
+motors = [{ name = "gripper", type = "RS00", send_id = 7, recv_id = 7 }]

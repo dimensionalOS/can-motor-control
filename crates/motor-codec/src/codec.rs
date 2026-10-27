@@ -38,6 +38,12 @@ pub trait MotorCodec: Send + Sync {
     /// been called by the time any encode method is invoked.
     fn bind_to_bus(&mut self, caps: BusCapabilities);
 
+    /// Bind motor identity before receiving frames. The default preserves stateless codecs.
+    fn bind_motor(&mut self, motor: MotorRef<'_>) -> Result<(), CodecError> {
+        let _ = motor;
+        Ok(())
+    }
+
     /// Encode the lifecycle "enable motor" command.
     fn encode_enable(&self, motor: MotorRef<'_>) -> Result<CanFrame, CodecError>;
 

@@ -1,0 +1,18 @@
+[package]
+name = "can-motor-robstride-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RobStride RS00 and RS06 classical CAN codec"
+
+[lib]
+name = "robstride_codec"
+
+[features]
+default = []
+std = ["motor-codec/std"]
+
+[dependencies]
+motor-codec = { workspace = true }
