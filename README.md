@@ -133,3 +133,18 @@ Homebrew libusb, PyUSB, or Python gs_usb package.
 ## License
 
 Dual-licensed under Apache-2.0 OR MIT.
+
+### MakerMods Metal firmware profiles
+
+Use `METAL_JLO` for J1/J3/J4, `METAL_J2` for J2, and `METAL_JHI` for
+J5/J6/gripper (Python `damiao.MotorType`; the TOML type names match).
+Rust uses `DamiaoMotorType::{MetalJlo, MetalJ2, MetalJhi}`.
+Their PMAX/VMAX/TMAX values are `(6.28, 10, 30)`, `(6.28, 10, 120)`, and
+`(6.28, 30, 20)` respectively. These firmware scaling ranges differ from
+stock Damiao SKUs and are not mechanical travel or safe torque limits.
+Confirm the actual motor register configuration before physical use.
+
+Reference: MakerMods' [pinned motor table](https://github.com/makermods-robotics/metal-python-ros/blob/bccf3c82a21453a7b1784a94966456e16ff0f008/metal_sdk/native/config/motor_config.cpp)
+and [LeRobot profiles](https://github.com/makermods-robotics/lerobot/blob/a86385a0f381fa81e227c41d2774fbb94c2610fc/src/lerobot/motors/damiao/tables.py).
+The profiles use the existing Damiao codec for both MIT commands and per-motor
+feedback. They do not add a vendor SDK or another transport implementation.

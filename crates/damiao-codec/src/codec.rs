@@ -296,9 +296,50 @@ mod tests {
     #[test]
     fn supports_all_known_skus() {
         let c = DamiaoCodec::new();
-        for d in 0..=12u16 {
+        for d in 0..=15u16 {
             assert!(c.supports(MotorTypeId::Damiao(d)), "discriminant {d}");
             assert!(c.limits(MotorTypeId::Damiao(d)).is_ok());
+        }
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)] // Exact firmware PMAX, not TAU.
+    fn metal_profiles_match_vendor_wire_anchors() {
+        let c = DamiaoCodec::new();
+        // Independent boundary vectors from MakerMods motor_config.cpp:
+        // PMAX=6.28 for all, VMAX=10/10/30, TMAX=30/120/20.
+        for (profile, velocity, torque) in [
+            (DamiaoMotorType::MetalJlo, 10.0, 30.0),
+            (DamiaoMotorType::MetalJ2, 10.0, 120.0),
+            (DamiaoMotorType::MetalJhi, 30.0, 20.0),
+        ] {
+            let motor = ref_motor("metal", profile, 1, 0x11);
+            let command = c
+                .encode_command(
+                    motor,
+                    &Command::Mit {
+                        q: 6.28,
+                        dq: velocity,
+                        kp: 0.0,
+                        kd: 0.0,
+                        tau: torque,
+                    },
+                )
+                .unwrap();
+            assert_eq!(command.id, 1);
+            assert_eq!(
+                command.payload(),
+                &[0xff, 0xff, 0xff, 0xf0, 0, 0, 0x0f, 0xff]
+            );
+            let frame = CanFrame::classical(0x11, &[1, 0, 0, 0xff, 0xf0, 0, 30, 35]).unwrap();
+            match c.decode(&frame, motor).unwrap().unwrap() {
+                Event::State { q, dq, tau, .. } => {
+                    assert_eq!(q, -6.28);
+                    assert_eq!(dq, velocity);
+                    assert_eq!(tau, -torque);
+                }
+                other => panic!("expected state, got {other:?}"),
+            }
         }
     }
 

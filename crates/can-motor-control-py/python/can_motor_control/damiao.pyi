@@ -18,6 +18,9 @@ class MotorType(IntEnum):
     DMH3510 = 10
     DMH6215 = 11
     DMG6220 = 12
+    METAL_JLO = 13
+    METAL_J2 = 14
+    METAL_JHI = 15
 
 class DamiaoCodec:
     def __init__(self) -> None: ...

@@ -191,6 +191,9 @@ pub enum PyMotorType {
     DMH3510 = 10,
     DMH6215 = 11,
     DMG6220 = 12,
+    METAL_JLO = 13,
+    METAL_J2 = 14,
+    METAL_JHI = 15,
 }
 
 impl From<PyMotorType> for MotorTypeId {
@@ -209,6 +212,9 @@ impl From<PyMotorType> for MotorTypeId {
             PyMotorType::DMH3510 => DamiaoMotorType::DMH3510,
             PyMotorType::DMH6215 => DamiaoMotorType::DMH6215,
             PyMotorType::DMG6220 => DamiaoMotorType::DMG6220,
+            PyMotorType::METAL_JLO => DamiaoMotorType::MetalJlo,
+            PyMotorType::METAL_J2 => DamiaoMotorType::MetalJ2,
+            PyMotorType::METAL_JHI => DamiaoMotorType::MetalJhi,
         };
         dm.into()
     }

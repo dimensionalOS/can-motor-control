@@ -37,6 +37,12 @@ pub enum DamiaoMotorType {
     DMH6215 = 11,
     /// DM-G6220 (gearbox geared).
     DMG6220 = 12,
+    /// MakerMods Metal J1/J3/J4 firmware profile (not a stock motor SKU).
+    MetalJlo = 13,
+    /// MakerMods Metal J2 firmware profile.
+    MetalJ2 = 14,
+    /// MakerMods Metal J5/J6/gripper firmware profile.
+    MetalJhi = 15,
 }
 
 impl DamiaoMotorType {
@@ -56,6 +62,9 @@ impl DamiaoMotorType {
             10 => Self::DMH3510,
             11 => Self::DMH6215,
             12 => Self::DMG6220,
+            13 => Self::MetalJlo,
+            14 => Self::MetalJ2,
+            15 => Self::MetalJhi,
             _ => return None,
         })
     }
@@ -86,6 +95,9 @@ pub fn parse_motor_type(s: &str) -> Option<MotorTypeId> {
         "DMH3510" => DamiaoMotorType::DMH3510,
         "DMH6215" => DamiaoMotorType::DMH6215,
         "DMG6220" => DamiaoMotorType::DMG6220,
+        "METAL_JLO" => DamiaoMotorType::MetalJlo,
+        "METAL_J2" => DamiaoMotorType::MetalJ2,
+        "METAL_JHI" => DamiaoMotorType::MetalJhi,
         _ => return None,
     };
     Some(t.into())
@@ -162,10 +174,13 @@ mod tests {
         ("DMH3510", 10),
         ("DMH6215", 11),
         ("DMG6220", 12),
+        ("METAL_JLO", 13),
+        ("METAL_J2", 14),
+        ("METAL_JHI", 15),
     ];
 
     #[test]
-    fn all_13_skus_parse() {
+    fn all_profiles_parse() {
         for (name, disc) in ALL_SKUS {
             let id = parse_motor_type(name).unwrap_or_else(|| panic!("parse {name}"));
             assert_eq!(id, MotorTypeId::Damiao(*disc), "SKU {name}");
