@@ -18,8 +18,7 @@ groups, robot, control loops, Python bindings — stays vendor-agnostic.
 - `limits(&self, motor_type: MotorTypeId) -> Result<Limits, CodecError>`
 - `bind_to_bus(&mut self, caps: BusCapabilities)`
 - `encode_enable / encode_disable / encode_set_zero / encode_command`
-- `decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError>`
-- `decode_for_motor(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError>`
+- `decode(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError>`
 
 It is object-safe (no associated types, no generics on methods), so the
 rest of the library uses `Box<dyn MotorCodec>` exclusively. The
@@ -67,9 +66,9 @@ A bus's codec is shared across every group attached to it. This means:
 
 - **Decode happens once per frame.** With arm + gripper on the same bus,
   the routing table (`bus.routes`) supplies the motor identity to
-  `decode_for_motor`, then dispatches the resulting event to the owning group.
-  Its default calls `decode`, so codecs that do not need motor context keep
-  their existing behavior. Frames without a receive-ID route use `decode`.
+  `decode`, then dispatches the resulting event to the owning group.
+  Every codec receives explicit motor configuration. Frames without a receive-ID
+  route are dropped before decoding; no motor profile is inferred or defaulted.
 - **CAN ID collisions are caught at `connect()`** because the routing
   table is built from all groups on the bus.
 - **Mixed vendors on one CAN wire is not supported in v1.** A real
@@ -82,8 +81,9 @@ A bus's codec is shared across every group attached to it. This means:
 Damiao feedback scaling uses the configured motor type on each receive-ID
 route. This supports mixed models on one bus, including DM4340 shoulder motors
 and DM4310 wrist motors. The same receive ID on a different bus keeps its own
-motor profile. Call `decode_for_motor` when decoding Damiao frames directly;
-context-free `decode` retains the DM4340 profile.
+motor profile. Direct calls to `decode` must also supply the configured
+`MotorRef`. Context-free decoding is not part of the codec interface; callers
+cannot fall back to a hardcoded DM4340 profile.
 
 Use the canonical `DM4340` profile for the Seeed reBot B601-DM's DM4340P
 motors. Their protocol limits are identical: position ±12.5 rad, velocity

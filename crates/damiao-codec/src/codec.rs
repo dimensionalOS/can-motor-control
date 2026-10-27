@@ -16,8 +16,7 @@ const VENDOR: &str = "damiao";
 /// Construct with [`DamiaoCodec::new`]. Implements
 /// [`MotorCodec`] for the vendor-agnostic surface and [`crate::DamiaoCodecExt`]
 /// for the Damiao-specific `0x7FF` parameter sub-protocol.
-/// Use [`MotorCodec::decode_for_motor`] for feedback scaling by motor type;
-/// context-free [`MotorCodec::decode`] retains the DM4340 profile.
+/// Feedback decoding requires the configured motor identity and uses its limits.
 #[derive(Default, Debug, Clone)]
 pub struct DamiaoCodec {
     bound_caps: Option<BusCapabilities>,
@@ -250,15 +249,7 @@ impl MotorCodec for DamiaoCodec {
         Ok(Some(u32::from_le_bytes([p[4], p[5], p[6], p[7]])))
     }
 
-    fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
-        self.decode_state(frame, limits_for(DamiaoMotorType::DM4340))
-    }
-
-    fn decode_for_motor(
-        &self,
-        frame: &CanFrame,
-        motor: MotorRef<'_>,
-    ) -> Result<Option<Event>, CodecError> {
+    fn decode(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError> {
         if frame.id != motor.recv_id {
             return Ok(None);
         }
@@ -426,7 +417,10 @@ mod tests {
     fn decode_foreign_frame_returns_none() {
         let c = DamiaoCodec::new();
         let f = CanFrame::classical(0x00, &[0x00; 8]).unwrap();
-        assert!(matches!(c.decode(&f), Ok(None)));
+        assert!(matches!(
+            c.decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
     }
 
     #[test]
@@ -438,7 +432,7 @@ mod tests {
             (DamiaoMotorType::DM4310, 30.0, -10.0),
         ] {
             let motor = ref_motor("j", model, 1, 0x11);
-            match c.decode_for_motor(&frame, motor).unwrap().unwrap() {
+            match c.decode(&frame, motor).unwrap().unwrap() {
                 Event::State {
                     motor_id,
                     q,
@@ -463,14 +457,17 @@ mod tests {
         let c = DamiaoCodec::new();
         let frame = CanFrame::classical(0x12, &[1, 0, 0, 0xff, 0xf0, 0, 30, 35]).unwrap();
         let motor = ref_motor("j", DamiaoMotorType::DM4310, 1, 0x11);
-        assert!(c.decode_for_motor(&frame, motor).unwrap().is_none());
+        assert!(c.decode(&frame, motor).unwrap().is_none());
     }
 
     #[test]
     fn decode_truncated_returns_none() {
         let c = DamiaoCodec::new();
         let f = CanFrame::classical(0x11, &[0x11, 0x00, 0x00]).unwrap();
-        assert!(matches!(c.decode(&f), Ok(None)));
+        assert!(matches!(
+            c.decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
     }
 
     #[test]
@@ -493,7 +490,11 @@ mod tests {
             35,
         ];
         let f = CanFrame::classical(0x11, &payload).unwrap();
-        match c.decode(&f).unwrap().unwrap() {
+        match c
+            .decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11))
+            .unwrap()
+            .unwrap()
+        {
             Event::State {
                 motor_id,
                 q: qo,
@@ -521,7 +522,10 @@ mod tests {
             [0x08, 0x81, 0x07, 0x80, 0x07, 0xFF, 0x1D, 0x1B],
         ] {
             match c
-                .decode(&CanFrame::classical(0x18, &payload).unwrap())
+                .decode(
+                    &CanFrame::classical(0x18, &payload).unwrap(),
+                    ref_motor("gripper", DamiaoMotorType::DM4310, 8, 0x18),
+                )
                 .unwrap()
             {
                 Some(Event::State {
@@ -612,15 +616,25 @@ mod tests {
         assert!(fd_frame.is_fd());
 
         // Unbound and classical-bound: not ours → None (v1 behavior).
-        assert!(matches!(DamiaoCodec::new().decode(&fd_frame), Ok(None)));
+        assert!(matches!(
+            DamiaoCodec::new().decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
         let mut classical = DamiaoCodec::new();
         classical.bind_to_bus(BusCapabilities::classical());
-        assert!(matches!(classical.decode(&fd_frame), Ok(None)));
+        assert!(matches!(
+            classical.decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
 
         // FD-bound: decoded as a state event.
         let mut fd = DamiaoCodec::new();
         fd.bind_to_bus(BusCapabilities::fd());
-        match fd.decode(&fd_frame).unwrap().unwrap() {
+        match fd
+            .decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11))
+            .unwrap()
+            .unwrap()
+        {
             Event::State { motor_id, .. } => assert_eq!(motor_id, 0x11),
             _ => panic!("expected State"),
         }
@@ -674,7 +688,7 @@ mod tests {
             c.decode_control_mode_readback(&response, m).unwrap(),
             Some(4)
         );
-        assert!(c.decode(&response).unwrap().is_none());
+        assert!(c.decode(&response, m).unwrap().is_none());
 
         let wrong_send = CanFrame::classical(0x18, &[0x06, 0, 0x33, 0x0A, 4, 0, 0, 0]).unwrap();
         assert_eq!(

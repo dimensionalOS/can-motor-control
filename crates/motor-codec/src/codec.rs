@@ -98,27 +98,18 @@ pub trait MotorCodec: Send + Sync {
         Ok(None)
     }
 
-    /// Decode an inbound frame.
+    /// Decode an inbound frame using the explicitly routed motor configuration.
     ///
-    /// Returns `Ok(Some(event))` for a recognized inbound message,
-    /// `Ok(None)` for frames the codec does not recognize (foreign vendor, or
-    /// a CAN ID outside the codec's address range), and
-    /// `Err(CodecError::DecodeFailed { .. })` for frames that look like the
-    /// codec's vendor but fail to parse.
-    fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError>;
-
-    /// Decode feedback with the identity of the motor routed to this frame.
+    /// The caller must resolve the bus-local receive route before decoding.
+    /// There is no context-free fallback or default motor profile.
     ///
-    /// Codecs whose feedback scaling depends on the motor type override this
-    /// method. The default preserves codecs that decode without motor context.
-    fn decode_for_motor(
-        &self,
-        frame: &CanFrame,
-        motor: MotorRef<'_>,
-    ) -> Result<Option<Event>, CodecError> {
-        let _ = motor;
-        self.decode(frame)
-    }
+    /// ```compile_fail
+    /// use motor_codec::{CanFrame, MotorCodec};
+    /// fn decode_without_configuration(codec: &dyn MotorCodec, frame: &CanFrame) {
+    ///     codec.decode(frame);
+    /// }
+    /// ```
+    fn decode(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError>;
 }
 
 /// Errors returned by [`MotorCodec`] implementations.
@@ -193,7 +184,7 @@ mod tests {
         fn encode_command(&self, _: MotorRef<'_>, _: &Command) -> Result<CanFrame, CodecError> {
             Err(CodecError::DecodeFailed { reason: "stub" })
         }
-        fn decode(&self, _: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(&self, _: &CanFrame, _: MotorRef<'_>) -> Result<Option<Event>, CodecError> {
             Ok(None)
         }
     }

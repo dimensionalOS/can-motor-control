@@ -118,7 +118,11 @@ impl MotorCodec for MockFeedbackCodec {
             .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
     }
 
-    fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+    fn decode(
+        &self,
+        frame: &CanFrame,
+        _motor: motor_codec::MotorRef<'_>,
+    ) -> Result<Option<Event>, CodecError> {
         if frame.id != self.recv_id {
             return Ok(None);
         }
