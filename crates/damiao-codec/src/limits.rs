@@ -8,8 +8,6 @@ use crate::types::DamiaoMotorType;
 ///
 /// Used to scale MIT-mode setpoints into bit-packed integers and to unscale
 /// state response integers back into f64.
-// Metal firmware specifies exactly 6.28, not mathematical TAU.
-#[allow(clippy::approx_constant)]
 pub(crate) const fn limits_for(t: DamiaoMotorType) -> Limits {
     match t {
         DamiaoMotorType::DM3507 => Limits {
@@ -77,22 +75,6 @@ pub(crate) const fn limits_for(t: DamiaoMotorType) -> Limits {
             v_max: 45.0,
             t_max: 10.0,
         },
-        // MakerMods firmware ranges, NOT mechanical travel or safe torque limits.
-        DamiaoMotorType::MetalJlo => Limits {
-            p_max: 6.28,
-            v_max: 10.0,
-            t_max: 30.0,
-        },
-        DamiaoMotorType::MetalJ2 => Limits {
-            p_max: 6.28,
-            v_max: 10.0,
-            t_max: 120.0,
-        },
-        DamiaoMotorType::MetalJhi => Limits {
-            p_max: 6.28,
-            v_max: 30.0,
-            t_max: 20.0,
-        },
     }
 }
 
@@ -110,7 +92,7 @@ mod tests {
 
     #[test]
     fn every_sku_positive_limits() {
-        for disc in 0..=15u16 {
+        for disc in 0..=12u16 {
             let t = DamiaoMotorType::from_discriminant(disc).unwrap();
             let l = limits_for(t);
             assert!(l.p_max > 0.0 && l.v_max > 0.0 && l.t_max > 0.0, "{t:?}");

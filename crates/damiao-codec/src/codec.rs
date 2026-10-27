@@ -1,5 +1,7 @@
 //! [`DamiaoCodec`] — implements [`motor_codec::MotorCodec`] for Damiao motors.
 
+use alloc::collections::BTreeMap;
+
 use motor_codec::{
     BusCapabilities, CanFrame, CodecError, Command, CommandKind, Event, FrameFlags, Limits,
     MotorCodec, MotorRef, MotorTypeId, ParamValue,
@@ -20,27 +22,35 @@ const VENDOR: &str = "damiao";
 #[derive(Default, Debug, Clone)]
 pub struct DamiaoCodec {
     bound_caps: Option<BusCapabilities>,
+    profiles: BTreeMap<u16, Limits>,
 }
 
 impl DamiaoCodec {
     /// Construct a new codec. `bind_to_bus` must be called before any encode.
     pub fn new() -> Self {
-        Self { bound_caps: None }
+        Self::default()
     }
 
-    fn motor_type(&self, id: MotorTypeId) -> Result<DamiaoMotorType, CodecError> {
-        match id {
-            MotorTypeId::Damiao(d) => {
-                DamiaoMotorType::from_discriminant(d).ok_or(CodecError::UnknownMotorType {
-                    vendor: VENDOR,
-                    type_id: d,
-                })
-            }
-            _ => Err(CodecError::UnknownMotorType {
-                vendor: VENDOR,
-                type_id: 0,
-            }),
+    /// Add a codec-local firmware profile without changing the built-in SKU table.
+    ///
+    /// IDs 0x8000..=0xffff are reserved for user profiles. Duplicate registration,
+    /// non-finite/non-positive ranges, and ranges whose full span overflows fail.
+    /// This configures host scaling only; it does not write motor registers.
+    pub fn with_profile(mut self, id: u16, limits: Limits) -> Result<Self, &'static str> {
+        if id < 0x8000 {
+            return Err("custom profile ID must be in 0x8000..=0xffff");
         }
+        if [limits.p_max, limits.v_max, limits.t_max]
+            .iter()
+            .any(|v| !v.is_finite() || *v <= 0.0 || !(2.0 * v).is_finite())
+        {
+            return Err("profile ranges must be finite, positive, and have a finite full span");
+        }
+        if self.profiles.contains_key(&id) {
+            return Err("duplicate custom profile ID");
+        }
+        self.profiles.insert(id, limits);
+        Ok(self)
     }
 
     fn encode_special(
@@ -105,12 +115,25 @@ impl MotorCodec for DamiaoCodec {
     }
 
     fn supports(&self, motor_type: MotorTypeId) -> bool {
-        matches!(motor_type, MotorTypeId::Damiao(d) if DamiaoMotorType::from_discriminant(d).is_some())
+        self.limits(motor_type).is_ok()
     }
 
     fn limits(&self, motor_type: MotorTypeId) -> Result<Limits, CodecError> {
-        let t = self.motor_type(motor_type)?;
-        Ok(limits_for(t))
+        if let MotorTypeId::Damiao(id) = motor_type {
+            if let Some(limits) = self.profiles.get(&id) {
+                return Ok(*limits);
+            }
+            if let Some(profile) = DamiaoMotorType::from_discriminant(id) {
+                return Ok(limits_for(profile));
+            }
+        }
+        Err(CodecError::UnknownMotorType {
+            vendor: VENDOR,
+            type_id: match motor_type {
+                MotorTypeId::Damiao(id) => id,
+                _ => 0,
+            },
+        })
     }
 
     fn bind_to_bus(&mut self, caps: BusCapabilities) {
@@ -134,8 +157,7 @@ impl MotorCodec for DamiaoCodec {
     }
 
     fn encode_command(&self, motor: MotorRef<'_>, cmd: &Command) -> Result<CanFrame, CodecError> {
-        let t = self.motor_type(motor.motor_type)?;
-        let lim = limits_for(t);
+        let lim = self.limits(motor.motor_type)?;
         match cmd {
             Command::Mit { kp, kd, q, dq, tau } => {
                 check_range("q", *q, lim.p_max)?;
@@ -296,37 +318,50 @@ mod tests {
     #[test]
     fn supports_all_known_skus() {
         let c = DamiaoCodec::new();
-        for d in 0..=15u16 {
+        for d in 0..=12u16 {
             assert!(c.supports(MotorTypeId::Damiao(d)), "discriminant {d}");
             assert!(c.limits(MotorTypeId::Damiao(d)).is_ok());
         }
     }
 
     #[test]
-    #[allow(clippy::approx_constant)] // Exact firmware PMAX, not TAU.
-    fn metal_profiles_match_vendor_wire_anchors() {
-        let c = DamiaoCodec::new();
-        // Independent boundary vectors from MakerMods motor_config.cpp:
-        // PMAX=6.28 for all, VMAX=10/10/30, TMAX=30/120/20.
-        for (profile, velocity, torque) in [
-            (DamiaoMotorType::MetalJlo, 10.0, 30.0),
-            (DamiaoMotorType::MetalJ2, 10.0, 120.0),
-            (DamiaoMotorType::MetalJhi, 30.0, 20.0),
+    #[allow(clippy::approx_constant)] // Exact vendor firmware value, not TAU.
+    fn custom_profiles_encode_and_decode_vendor_wire_anchors() {
+        let mut c = DamiaoCodec::new();
+        for (id, v_max, t_max) in [
+            (0x8000, 10.0, 30.0),
+            (0x8001, 10.0, 120.0),
+            (0x8002, 30.0, 20.0),
         ] {
-            let motor = ref_motor("metal", profile, 1, 0x11);
+            c = c
+                .with_profile(
+                    id,
+                    Limits {
+                        p_max: 6.28,
+                        v_max,
+                        t_max,
+                    },
+                )
+                .unwrap();
+            let motor = MotorRef {
+                motor_type: MotorTypeId::Damiao(id),
+                send_id: 1,
+                recv_id: 0x11,
+                name: "custom",
+            };
+            assert!(c.supports(motor.motor_type));
             let command = c
                 .encode_command(
                     motor,
                     &Command::Mit {
                         q: 6.28,
-                        dq: velocity,
+                        dq: v_max,
                         kp: 0.0,
                         kd: 0.0,
-                        tau: torque,
+                        tau: t_max,
                     },
                 )
                 .unwrap();
-            assert_eq!(command.id, 1);
             assert_eq!(
                 command.payload(),
                 &[0xff, 0xff, 0xff, 0xf0, 0, 0, 0x0f, 0xff]
@@ -335,10 +370,47 @@ mod tests {
             match c.decode(&frame, motor).unwrap().unwrap() {
                 Event::State { q, dq, tau, .. } => {
                     assert_eq!(q, -6.28);
-                    assert_eq!(dq, velocity);
-                    assert_eq!(tau, -torque);
+                    assert_eq!(dq, v_max);
+                    assert_eq!(tau, -t_max);
                 }
                 other => panic!("expected state, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn custom_profile_registration_is_validated_and_codec_local() {
+        let valid = Limits {
+            p_max: 1.0,
+            v_max: 2.0,
+            t_max: 3.0,
+        };
+        let custom = MotorTypeId::Damiao(0x8000);
+        let c = DamiaoCodec::new().with_profile(0x8000, valid).unwrap();
+        assert_eq!(c.limits(custom).unwrap(), valid);
+        assert!(!DamiaoCodec::new().supports(custom));
+        assert!(c.clone().with_profile(0x8000, valid).is_err());
+        assert!(DamiaoCodec::new().with_profile(3, valid).is_err());
+        assert_eq!(
+            c.limits(DamiaoMotorType::DM4340.into()).unwrap(),
+            limits_for(DamiaoMotorType::DM4340)
+        );
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            for limits in [
+                Limits {
+                    p_max: invalid,
+                    ..valid
+                },
+                Limits {
+                    v_max: invalid,
+                    ..valid
+                },
+                Limits {
+                    t_max: invalid,
+                    ..valid
+                },
+            ] {
+                assert!(DamiaoCodec::new().with_profile(0xffff, limits).is_err());
             }
         }
     }
