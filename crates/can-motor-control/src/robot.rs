@@ -477,7 +477,22 @@ impl Robot {
                         }
                     }
                 }
-                let decoded = bus.codec.decode(frame).map_err(Error::Codec)?;
+                let decoded = if let Some(route) = bus.routes.get(&frame.id) {
+                    let group = self.groups.get(&route.group_name).expect("route invariant");
+                    let motor = &group.inner().motors()[route.motor_index];
+                    bus.codec.decode_for_motor(
+                        frame,
+                        motor_codec::MotorRef {
+                            motor_type: motor.motor_type(),
+                            send_id: motor.send_id(),
+                            recv_id: motor.recv_id(),
+                            name: motor.name(),
+                        },
+                    )
+                } else {
+                    bus.codec.decode(frame)
+                }
+                .map_err(Error::Codec)?;
                 if let Some(event) = decoded {
                     let motor_id = match event {
                         motor_codec::Event::State { motor_id, .. } => motor_id,
@@ -1290,6 +1305,26 @@ mod tests {
             .build()
             .unwrap();
         assert!(matches!(robot.enable(), Err(Error::NotConnected)));
+    }
+
+    #[test]
+    fn contextual_decode_default_preserves_existing_codec_feedback() {
+        let (codec, _, decodes) = CountingCodec::new();
+        let bus = MockCanBus::new("main");
+        let mut robot = RobotBuilder::new()
+            .add_bus("main", Box::new(bus.clone()), Box::new(codec))
+            .add_arm("arm", "main", vec![motor("j0", 1, 0x11)])
+            .build()
+            .unwrap();
+        robot.connect().unwrap();
+        bus.inject_frame(CanFrame::classical(0x11, &[1; 8]).unwrap());
+        robot.tick(Duration::ZERO).unwrap();
+
+        let arm = robot.group("arm").unwrap().as_arm().unwrap();
+        assert_eq!(arm.positions(), vec![1.0]);
+        assert_eq!(arm.velocities(), vec![2.0]);
+        assert_eq!(arm.torques(), vec![3.0]);
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
     #[test]

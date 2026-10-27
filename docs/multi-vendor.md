@@ -19,6 +19,7 @@ groups, robot, control loops, Python bindings — stays vendor-agnostic.
 - `bind_to_bus(&mut self, caps: BusCapabilities)`
 - `encode_enable / encode_disable / encode_set_zero / encode_command`
 - `decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError>`
+- `decode_for_motor(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError>`
 
 It is object-safe (no associated types, no generics on methods), so the
 rest of the library uses `Box<dyn MotorCodec>` exclusively. The
@@ -65,14 +66,29 @@ No changes are required to `Robot`, `RobotBuilder`, `Arm`, `Gripper`,
 A bus's codec is shared across every group attached to it. This means:
 
 - **Decode happens once per frame.** With arm + gripper on the same bus,
-  only the bus's codec decodes; the routing table (`bus.routes`)
-  dispatches the resulting event to the owning group.
+  the routing table (`bus.routes`) supplies the motor identity to
+  `decode_for_motor`, then dispatches the resulting event to the owning group.
+  Its default calls `decode`, so codecs that do not need motor context keep
+  their existing behavior. Frames without a receive-ID route use `decode`.
 - **CAN ID collisions are caught at `connect()`** because the routing
   table is built from all groups on the bus.
 - **Mixed vendors on one CAN wire is not supported in v1.** A real
   hardware setup that mixes Damiao + Robostride on one bus would need
   to split into two buses, or wait for a future "multi-vendor bus"
   change.
+
+## Damiao motor profiles
+
+Damiao feedback scaling uses the configured motor type on each receive-ID
+route. This supports mixed models on one bus, including DM4340 shoulder motors
+and DM4310 wrist motors. The same receive ID on a different bus keeps its own
+motor profile. Call `decode_for_motor` when decoding Damiao frames directly;
+context-free `decode` retains the DM4340 profile.
+
+Use the canonical `DM4340` profile for the Seeed reBot B601-DM's DM4340P
+motors. Their protocol limits are identical: position ±12.5 rad, velocity
+±10 rad/s, and torque ±28 Nm. No separate enum is needed. DM4310 has different
+velocity and torque limits and must remain configured as `DM4310`.
 
 ## Vendor extensions
 

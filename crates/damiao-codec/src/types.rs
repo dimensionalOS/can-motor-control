@@ -17,7 +17,7 @@ pub enum DamiaoMotorType {
     DM4310 = 1,
     /// DM-4310 48V.
     DM4310_48V = 2,
-    /// DM-4340 24V (default workhorse for OpenArm).
+    /// DM-4340 24V, also the DM-4340P protocol profile.
     DM4340 = 3,
     /// DM-4340 48V.
     DM4340_48V = 4,
