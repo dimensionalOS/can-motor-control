@@ -133,3 +133,39 @@ Homebrew libusb, PyUSB, or Python gs_usb package.
 ## License
 
 Dual-licensed under Apache-2.0 OR MIT.
+
+### Custom Damiao firmware profiles
+
+Users can define firmware scaling without editing this library or adding a
+motor SKU enum. Register a profile on the bus codec and use it in `MotorSpec`:
+
+```python
+from can_motor_control import MockCanBus, MotorSpec, Robot
+from can_motor_control.damiao import DamiaoCodec, MotorProfile
+
+shoulder = MotorProfile(0x8000, p_max=6.28, v_max=10.0, t_max=120.0)
+robot = (
+    Robot.builder()
+    .add_bus("main", MockCanBus("example"), DamiaoCodec(profiles=[shoulder]))
+    .add_arm("arm", bus="main", motors=[MotorSpec("joint", shoulder, 1, 0x11)])
+    .build()
+)
+```
+
+`id` is a codec-local profile key, not a CAN ID. Use 0x8000..=0xffff for
+custom profiles; built-in SKU IDs cannot be overridden. Register every custom
+profile used on a bus in that bus's codec. IDs may be reused on independent
+codecs. Duplicate registrations are rejected. Existing `MotorType` members
+and `DamiaoCodec()` work unchanged.
+
+Rust users call `DamiaoCodec::new().with_profile(id, motor_codec::Limits { ... })`
+and use `motor_codec::MotorTypeId::Damiao(id)` in `MotorSpec`. The codec applies
+the registered ranges to both MIT command encoding and feedback decoding,
+including mixed custom/built-in motors on the same bus. This API is for code-built
+robots; the built-in TOML loader continues to resolve stock SKU names.
+
+`p_max`, `v_max`, and `t_max` are positive finite magnitudes in radians, rad/s,
+and Nm; their full spans must also be finite. These configure host protocol
+scaling, not mechanical safety limits, gains, gear ratios, or firmware registers.
+They must match the actual motor firmware configuration. The example values
+come from the [MakerMods Metal J2 firmware table](https://github.com/makermods-robotics/metal-python-ros/blob/bccf3c82a21453a7b1784a94966456e16ff0f008/metal_sdk/native/config/motor_config.cpp).

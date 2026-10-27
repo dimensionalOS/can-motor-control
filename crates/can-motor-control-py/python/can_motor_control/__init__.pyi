@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Iterator
 import sys
 from typing import Any, ClassVar
 
 import numpy as np
+from .damiao import MotorProfile, MotorType
 
 class DmError(Exception): ...
 class TransportError(DmError): ...
@@ -73,7 +75,7 @@ class MockFeedbackCodec:
     def __init__(self, recv_id: int) -> None: ...
 
 class MotorSpec:
-    def __init__(self, name: str, type: int, send_id: int, recv_id: int) -> None: ...
+    def __init__(self, name: str, type: MotorType | MotorProfile, send_id: int, recv_id: int) -> None: ...
 
 class Motor:
     name: str

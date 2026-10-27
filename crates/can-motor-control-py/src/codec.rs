@@ -6,6 +6,7 @@ use damiao_codec::{DamiaoCodec, DamiaoMotorType};
 use motor_codec::{
     CanFrame, CodecError, Command, Event, Limits, MotorCodec, MotorRef, MotorTypeId,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Same shape as `TransportHandle`: a Box-trait-object that the builder
@@ -41,10 +42,63 @@ pub struct PyDamiaoCodec {
 impl PyDamiaoCodec {
     /// Create a Damiao codec.
     #[new]
-    fn new() -> Self {
-        Self {
-            handle: CodecHandle::new(DamiaoCodec::new()),
+    #[pyo3(signature = (*, profiles=Vec::new()))]
+    fn new(profiles: Vec<PyRef<'_, PyMotorProfile>>) -> PyResult<Self> {
+        let mut codec = DamiaoCodec::new();
+        for profile in profiles {
+            codec = codec
+                .with_profile(profile.id, profile.limits())
+                .map_err(PyValueError::new_err)?;
         }
+        Ok(Self {
+            handle: CodecHandle::new(codec),
+        })
+    }
+}
+
+/// Immutable custom firmware scaling, local to each DamiaoCodec that registers it.
+///
+/// Pass this same profile to MotorSpec and DamiaoCodec(profiles=[...]).
+/// This does not configure motor firmware or define mechanical safety limits.
+#[pyclass(name = "MotorProfile", module = "can_motor_control.damiao", frozen)]
+#[derive(Clone)]
+pub struct PyMotorProfile {
+    #[pyo3(get)]
+    pub id: u16,
+    #[pyo3(get)]
+    pub p_max: f64,
+    #[pyo3(get)]
+    pub v_max: f64,
+    #[pyo3(get)]
+    pub t_max: f64,
+}
+
+impl PyMotorProfile {
+    fn limits(&self) -> Limits {
+        Limits {
+            p_max: self.p_max,
+            v_max: self.v_max,
+            t_max: self.t_max,
+        }
+    }
+}
+
+#[pymethods]
+impl PyMotorProfile {
+    /// Create a custom profile using an ID in 0x8000..=0xffff.
+    #[new]
+    #[pyo3(signature = (id, *, p_max, v_max, t_max))]
+    fn new(id: u16, p_max: f64, v_max: f64, t_max: f64) -> PyResult<Self> {
+        let profile = Self {
+            id,
+            p_max,
+            v_max,
+            t_max,
+        };
+        DamiaoCodec::new()
+            .with_profile(id, profile.limits())
+            .map_err(PyValueError::new_err)?;
+        Ok(profile)
     }
 }
 

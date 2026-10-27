@@ -19,7 +19,7 @@ mod robot;
 mod spec;
 mod transport;
 
-use codec::{PyDamiaoCodec, PyMockFeedbackCodec, PyMotorType};
+use codec::{PyDamiaoCodec, PyMockFeedbackCodec, PyMotorProfile, PyMotorType};
 use frame::PyCanFrame;
 use robot::{PyArm, PyGripper, PyMotor, PyMotorGroup, PyRobot, PyRobotBuilder};
 use spec::PyMotorSpec;
@@ -82,6 +82,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(target_os = "macos")]
     m.add_function(wrap_pyfunction!(py_list_gs_usb_devices, m)?)?;
     m.add_class::<PyMotorSpec>()?;
+    m.add_class::<PyMotorProfile>()?;
     m.add_class::<PyMotor>()?;
     m.add_class::<PyArm>()?;
     m.add_class::<PyGripper>()?;

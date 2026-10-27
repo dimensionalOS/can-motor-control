@@ -57,3 +57,41 @@ fn mixed_damiao_feedback_uses_each_motors_profile_and_bus() {
     assert_eq!(gripper.motor().velocity(), 30.0);
     assert_eq!(gripper.motor().torque(), -10.0);
 }
+
+#[test]
+fn custom_profile_is_used_by_mixed_robot_feedback() {
+    use motor_codec::{Limits, MotorTypeId};
+    let bus = MockCanBus::new("custom");
+    let profile = MotorTypeId::Damiao(0x8000);
+    let codec = DamiaoCodec::new()
+        .with_profile(
+            0x8000,
+            Limits {
+                p_max: 6.0,
+                v_max: 10.0,
+                t_max: 120.0,
+            },
+        )
+        .unwrap();
+    let mut robot = RobotBuilder::new()
+        .add_bus("custom", Box::new(bus.clone()), Box::new(codec))
+        .add_arm(
+            "arm",
+            "custom",
+            vec![
+                MotorSpec::new("custom", profile, 1, 0x11),
+                MotorSpec::new("stock", DamiaoMotorType::DM4310, 2, 0x12),
+            ],
+        )
+        .build()
+        .unwrap();
+    robot.connect().unwrap();
+    let payload = [1, 0, 0, 0xff, 0xf0, 0, 30, 35];
+    bus.inject_frame(CanFrame::classical(0x11, &payload).unwrap());
+    bus.inject_frame(CanFrame::classical(0x12, &payload).unwrap());
+    robot.tick(Duration::ZERO).unwrap();
+    let arm = robot.group("arm").unwrap().as_arm().unwrap();
+    assert_eq!(arm.positions(), vec![-6.0, -12.5]);
+    assert_eq!(arm.velocities(), vec![10.0, 30.0]);
+    assert_eq!(arm.torques(), vec![-120.0, -10.0]);
+}
