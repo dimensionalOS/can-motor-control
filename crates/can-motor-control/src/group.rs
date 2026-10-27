@@ -1079,7 +1079,11 @@ mod integration_tests {
                 .map(Some)
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, _: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            _: &CanFrame,
+            _: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             Ok(None)
         }
     }

@@ -477,7 +477,23 @@ impl Robot {
                         }
                     }
                 }
-                let decoded = bus.codec.decode(frame).map_err(Error::Codec)?;
+                let Some(route) = bus.routes.get(&frame.id) else {
+                    continue;
+                };
+                let decoded = {
+                    let group = self.groups.get(&route.group_name).expect("route invariant");
+                    let motor = &group.inner().motors()[route.motor_index];
+                    bus.codec.decode(
+                        frame,
+                        motor_codec::MotorRef {
+                            motor_type: motor.motor_type(),
+                            send_id: motor.send_id(),
+                            recv_id: motor.recv_id(),
+                            name: motor.name(),
+                        },
+                    )
+                }
+                .map_err(Error::Codec)?;
                 if let Some(event) = decoded {
                     let motor_id = match event {
                         motor_codec::Event::State { motor_id, .. } => motor_id,
@@ -826,7 +842,11 @@ mod tests {
             CanFrame::classical(m.send_id, &[0x55])
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             self.decodes.fetch_add(1, Ordering::SeqCst);
             if frame.is_fd() || frame.flags.contains(FrameFlags::REMOTE_REQUEST) {
                 return Ok(None);
@@ -878,7 +898,11 @@ mod tests {
                 .map(Some)
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             Ok(Some(Event::State {
                 motor_id: frame.id,
                 q: 0.0,
@@ -947,7 +971,11 @@ mod tests {
                 .map(Some)
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             let idx = self.decodes.fetch_add(1, Ordering::SeqCst);
             let q = self.positions[idx.min(self.positions.len().saturating_sub(1))];
             Ok(Some(Event::State {
@@ -1019,7 +1047,11 @@ mod tests {
                 .map(Some)
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             Ok(Some(Event::State {
                 motor_id: frame.id,
                 q: *self.position.lock().unwrap(),
@@ -1107,7 +1139,11 @@ mod tests {
                 Ok(None)
             }
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             if frame.payload()[0] == 0x20 || frame.payload()[0] == 0x10 || frame.id == 0x7ff {
                 return Ok(None);
             }
@@ -1290,6 +1326,46 @@ mod tests {
             .build()
             .unwrap();
         assert!(matches!(robot.enable(), Err(Error::NotConnected)));
+    }
+
+    #[test]
+    fn unknown_receive_id_is_dropped_before_decoding() {
+        let (codec, _, decodes) = CountingCodec::new();
+        let bus = MockCanBus::new("main");
+        let mut robot = RobotBuilder::new()
+            .add_bus("main", Box::new(bus.clone()), Box::new(codec))
+            .add_arm("arm", "main", vec![motor("j0", 1, 0x11)])
+            .build()
+            .unwrap();
+        robot.connect().unwrap();
+        bus.inject_frame(CanFrame::classical(0x99, &[1; 8]).unwrap());
+        robot.tick(Duration::ZERO).unwrap();
+
+        assert_eq!(decodes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            robot.group("arm").unwrap().as_arm().unwrap().positions(),
+            vec![0.0]
+        );
+    }
+
+    #[test]
+    fn explicit_motor_decode_preserves_vendor_independent_feedback() {
+        let (codec, _, decodes) = CountingCodec::new();
+        let bus = MockCanBus::new("main");
+        let mut robot = RobotBuilder::new()
+            .add_bus("main", Box::new(bus.clone()), Box::new(codec))
+            .add_arm("arm", "main", vec![motor("j0", 1, 0x11)])
+            .build()
+            .unwrap();
+        robot.connect().unwrap();
+        bus.inject_frame(CanFrame::classical(0x11, &[1; 8]).unwrap());
+        robot.tick(Duration::ZERO).unwrap();
+
+        let arm = robot.group("arm").unwrap().as_arm().unwrap();
+        assert_eq!(arm.positions(), vec![1.0]);
+        assert_eq!(arm.velocities(), vec![2.0]);
+        assert_eq!(arm.torques(), vec![3.0]);
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
     #[test]

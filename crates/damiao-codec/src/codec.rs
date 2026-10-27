@@ -16,6 +16,7 @@ const VENDOR: &str = "damiao";
 /// Construct with [`DamiaoCodec::new`]. Implements
 /// [`MotorCodec`] for the vendor-agnostic surface and [`crate::DamiaoCodecExt`]
 /// for the Damiao-specific `0x7FF` parameter sub-protocol.
+/// Feedback decoding requires the configured motor identity and uses its limits.
 #[derive(Default, Debug, Clone)]
 pub struct DamiaoCodec {
     bound_caps: Option<BusCapabilities>,
@@ -51,6 +52,50 @@ impl DamiaoCodec {
         CanFrame::classical(motor.send_id, &payload).map_err(|_| CodecError::DecodeFailed {
             reason: "classical frame construction failed",
         })
+    }
+
+    fn decode_state(&self, frame: &CanFrame, limits: Limits) -> Result<Option<Event>, CodecError> {
+        // Damiao state responses come on the recv_id assigned to the motor, with
+        // the response command in the top nibble of byte 0.
+        if frame.is_fd() && !self.bound_caps.is_some_and(|c| c.supports_fd) {
+            // Not bound to an FD bus: an FD frame isn't a Damiao state frame we
+            // expect here. (A classical binding therefore behaves exactly as v1.)
+            return Ok(None);
+        }
+        if frame.flags.contains(FrameFlags::REMOTE_REQUEST) {
+            return Ok(None);
+        }
+        // Parameter traffic is not a state frame. In particular, a 0x55 write
+        // acknowledgement must never update motor state.
+        if frame.id == 0x7FF || (frame.payload()[2] == 0x33 || frame.payload()[2] == 0x55) {
+            return Ok(None);
+        }
+        if frame.len != 8 {
+            // Damiao always uses 8 bytes; a different length is not a Damiao state frame.
+            return Ok(None);
+        }
+        let byte0 = frame.payload()[0];
+        let reported_id = byte0 & 0x0f;
+        let payload: [u8; 8] =
+            frame
+                .payload()
+                .try_into()
+                .map_err(|_| CodecError::DecodeFailed {
+                    reason: "expected 8-byte payload",
+                })?;
+        let (_, _, q, dq, tau, t_mos, t_rotor) =
+            unpack_state_payload(&payload, limits.p_max, limits.v_max, limits.t_max);
+        if reported_id == 0 && frame.id == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Event::State {
+            motor_id: frame.id,
+            q,
+            dq,
+            tau,
+            t_mos,
+            t_rotor,
+        }))
     }
 }
 
@@ -204,53 +249,11 @@ impl MotorCodec for DamiaoCodec {
         Ok(Some(u32::from_le_bytes([p[4], p[5], p[6], p[7]])))
     }
 
-    fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
-        // Damiao state responses come on the recv_id assigned to the motor, with
-        // the response command in the top nibble of byte 0.
-        if frame.is_fd() && !self.bound_caps.is_some_and(|c| c.supports_fd) {
-            // Not bound to an FD bus: an FD frame isn't a Damiao state frame we
-            // expect here. (A classical binding therefore behaves exactly as v1.)
+    fn decode(&self, frame: &CanFrame, motor: MotorRef<'_>) -> Result<Option<Event>, CodecError> {
+        if frame.id != motor.recv_id {
             return Ok(None);
         }
-        if frame.flags.contains(FrameFlags::REMOTE_REQUEST) {
-            return Ok(None);
-        }
-        // Parameter traffic is not a state frame. In particular, a 0x55 write
-        // acknowledgement must never update motor state.
-        if frame.id == 0x7FF || (frame.payload()[2] == 0x33 || frame.payload()[2] == 0x55) {
-            return Ok(None);
-        }
-        if frame.len != 8 {
-            // Damiao always uses 8 bytes; a different length is not a Damiao state frame.
-            return Ok(None);
-        }
-        let byte0 = frame.payload()[0];
-        let reported_id = byte0 & 0x0f;
-        // Limits: the codec doesn't have a per-recv_id motor-type registry in
-        // v1, so it uses DM4340 limits as the OpenArm walking-skeleton default.
-        // A future change will register per-motor limits at bind time so mixed-
-        // SKU buses decode each motor with its own limits.
-        let payload: [u8; 8] =
-            frame
-                .payload()
-                .try_into()
-                .map_err(|_| CodecError::DecodeFailed {
-                    reason: "expected 8-byte payload",
-                })?;
-        let dm = limits_for(DamiaoMotorType::DM4340);
-        let (_, _, q, dq, tau, t_mos, t_rotor) =
-            unpack_state_payload(&payload, dm.p_max, dm.v_max, dm.t_max);
-        if reported_id == 0 && frame.id == 0 {
-            return Ok(None);
-        }
-        Ok(Some(Event::State {
-            motor_id: frame.id,
-            q,
-            dq,
-            tau,
-            t_mos,
-            t_rotor,
-        }))
+        self.decode_state(frame, self.limits(motor.motor_type)?)
     }
 }
 
@@ -414,14 +417,57 @@ mod tests {
     fn decode_foreign_frame_returns_none() {
         let c = DamiaoCodec::new();
         let f = CanFrame::classical(0x00, &[0x00; 8]).unwrap();
-        assert!(matches!(c.decode(&f), Ok(None)));
+        assert!(matches!(
+            c.decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn contextual_feedback_decodes_known_wire_values_with_each_profile() {
+        let c = DamiaoCodec::new();
+        let frame = CanFrame::classical(0x11, &[1, 0, 0, 0xff, 0xf0, 0, 30, 35]).unwrap();
+        for (model, velocity, torque) in [
+            (DamiaoMotorType::DM4340, 10.0, -28.0),
+            (DamiaoMotorType::DM4310, 30.0, -10.0),
+        ] {
+            let motor = ref_motor("j", model, 1, 0x11);
+            match c.decode(&frame, motor).unwrap().unwrap() {
+                Event::State {
+                    motor_id,
+                    q,
+                    dq,
+                    tau,
+                    t_mos,
+                    t_rotor,
+                } => {
+                    assert_eq!(motor_id, 0x11);
+                    assert_eq!(q, -12.5);
+                    assert_eq!(dq, velocity);
+                    assert_eq!(tau, torque);
+                    assert_eq!((t_mos, t_rotor), (30, 35));
+                }
+                other => panic!("expected state, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_feedback_ignores_another_motors_receive_id() {
+        let c = DamiaoCodec::new();
+        let frame = CanFrame::classical(0x12, &[1, 0, 0, 0xff, 0xf0, 0, 30, 35]).unwrap();
+        let motor = ref_motor("j", DamiaoMotorType::DM4310, 1, 0x11);
+        assert!(c.decode(&frame, motor).unwrap().is_none());
     }
 
     #[test]
     fn decode_truncated_returns_none() {
         let c = DamiaoCodec::new();
         let f = CanFrame::classical(0x11, &[0x11, 0x00, 0x00]).unwrap();
-        assert!(matches!(c.decode(&f), Ok(None)));
+        assert!(matches!(
+            c.decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
     }
 
     #[test]
@@ -444,7 +490,11 @@ mod tests {
             35,
         ];
         let f = CanFrame::classical(0x11, &payload).unwrap();
-        match c.decode(&f).unwrap().unwrap() {
+        match c
+            .decode(&f, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11))
+            .unwrap()
+            .unwrap()
+        {
             Event::State {
                 motor_id,
                 q: qo,
@@ -472,7 +522,10 @@ mod tests {
             [0x08, 0x81, 0x07, 0x80, 0x07, 0xFF, 0x1D, 0x1B],
         ] {
             match c
-                .decode(&CanFrame::classical(0x18, &payload).unwrap())
+                .decode(
+                    &CanFrame::classical(0x18, &payload).unwrap(),
+                    ref_motor("gripper", DamiaoMotorType::DM4310, 8, 0x18),
+                )
                 .unwrap()
             {
                 Some(Event::State {
@@ -563,15 +616,25 @@ mod tests {
         assert!(fd_frame.is_fd());
 
         // Unbound and classical-bound: not ours → None (v1 behavior).
-        assert!(matches!(DamiaoCodec::new().decode(&fd_frame), Ok(None)));
+        assert!(matches!(
+            DamiaoCodec::new().decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
         let mut classical = DamiaoCodec::new();
         classical.bind_to_bus(BusCapabilities::classical());
-        assert!(matches!(classical.decode(&fd_frame), Ok(None)));
+        assert!(matches!(
+            classical.decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11)),
+            Ok(None)
+        ));
 
         // FD-bound: decoded as a state event.
         let mut fd = DamiaoCodec::new();
         fd.bind_to_bus(BusCapabilities::fd());
-        match fd.decode(&fd_frame).unwrap().unwrap() {
+        match fd
+            .decode(&fd_frame, ref_motor("j", DamiaoMotorType::DM4340, 1, 0x11))
+            .unwrap()
+            .unwrap()
+        {
             Event::State { motor_id, .. } => assert_eq!(motor_id, 0x11),
             _ => panic!("expected State"),
         }
@@ -625,7 +688,7 @@ mod tests {
             c.decode_control_mode_readback(&response, m).unwrap(),
             Some(4)
         );
-        assert!(c.decode(&response).unwrap().is_none());
+        assert!(c.decode(&response, m).unwrap().is_none());
 
         let wrong_send = CanFrame::classical(0x18, &[0x06, 0, 0x33, 0x0A, 4, 0, 0, 0]).unwrap();
         assert_eq!(

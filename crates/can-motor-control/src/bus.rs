@@ -125,7 +125,11 @@ mod tests {
             CanFrame::classical(m.send_id, &[0x55])
                 .map_err(|_| CodecError::DecodeFailed { reason: "frame" })
         }
-        fn decode(&self, frame: &CanFrame) -> Result<Option<Event>, CodecError> {
+        fn decode(
+            &self,
+            frame: &CanFrame,
+            _motor: motor_codec::MotorRef<'_>,
+        ) -> Result<Option<Event>, CodecError> {
             self.decodes.fetch_add(1, Ordering::SeqCst);
             Ok(Some(Event::State {
                 motor_id: frame.id,
