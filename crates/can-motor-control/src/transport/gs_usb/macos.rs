@@ -37,6 +37,7 @@ const RESET_SETTLE: Duration = Duration::from_millis(50);
 const STALE_QUIET_INTERVAL: Duration = Duration::from_millis(20);
 const STALE_FLUSH_LIMIT: Duration = Duration::from_millis(500);
 const IN_FLIGHT: usize = 4;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 const BREQ_HOST_FORMAT: u8 = 0;
 const BREQ_BITTIMING: u8 = 1;
@@ -115,7 +116,8 @@ impl GsUsbConfig {
 /// boundary has been established. `send` performs no USB I/O: success means a
 /// bounded worker queue accepted responsibility for attempting the frame.
 /// Runtime USB failures fault the bus permanently; reconstruct it to recover.
-/// Dropping the bus cancels transfers, resets channel 0, releases the claimed
+/// Dropping the bus drains accepted TX frames and CAN echoes with a bounded
+/// timeout, then cancels transfers, resets channel 0, releases the claimed
 /// interface through nusb's ownership model, and joins the worker.
 pub struct GsUsbBus {
     name: String,
@@ -274,6 +276,9 @@ impl Drop for GsUsbBus {
             if worker.join().is_err() {
                 log::error!("gs_usb worker panicked during shutdown");
             }
+        }
+        if let Err(error) = self.terminal_result() {
+            log::error!("gs_usb shutdown failed: {error}");
         }
     }
 }
@@ -639,6 +644,53 @@ fn submit_input(input: &mut Endpoint<Bulk, In>, request_size: usize) {
     input.submit(buffer);
 }
 
+// A sender can close while disable frames are still queued. Preserve those
+// frames, including ones already submitted to USB, until their CAN TX echoes
+// arrive. Bulk-OUT completion alone only confirms delivery to the adapter.
+#[derive(Default)]
+struct ShutdownDrain {
+    deadline: Option<Instant>,
+}
+
+impl ShutdownDrain {
+    fn request(&mut self, now: Instant) {
+        self.deadline.get_or_insert(now + SHUTDOWN_DRAIN_TIMEOUT);
+    }
+
+    fn finished(
+        &self,
+        now: Instant,
+        queued: usize,
+        submitted: usize,
+        echoes: usize,
+    ) -> Result<bool, String> {
+        let Some(deadline) = self.deadline else {
+            return Ok(false);
+        };
+        if queued == 0 && submitted == 0 && echoes == 0 {
+            return Ok(true);
+        }
+        if now >= deadline {
+            return Err(format!(
+                "gs_usb shutdown TX drain timed out: {queued} queued, \
+                 {submitted} USB transfers, {echoes} CAN echoes outstanding"
+            ));
+        }
+        Ok(false)
+    }
+}
+
+fn receive_pending(tx: &Receiver<CanFrame>, pending: &mut VecDeque<CanFrame>) -> bool {
+    while pending.len() < TX_CAPACITY {
+        match tx.try_recv() {
+            Ok(frame) => pending.push_back(frame),
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => return true,
+        }
+    }
+    false
+}
+
 fn run_session(
     session: &mut UsbSession,
     tx: &Receiver<CanFrame>,
@@ -650,18 +702,22 @@ fn run_session(
     let mut pending_tx = VecDeque::new();
     let mut input_halt_recovered = false;
     let mut output_halt_recovered = false;
+    let mut draining = ShutdownDrain::default();
 
     loop {
         if shutdown.try_recv().is_ok() {
-            return Ok(());
+            draining.request(Instant::now());
         }
-
-        while pending_tx.len() < TX_CAPACITY {
-            match tx.try_recv() {
-                Ok(frame) => pending_tx.push_back(frame),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return Ok(()),
-            }
+        if receive_pending(tx, &mut pending_tx) {
+            draining.request(Instant::now());
+        }
+        if draining.finished(
+            Instant::now(),
+            pending_tx.len(),
+            session.output.pending(),
+            echoes.in_use(),
+        )? {
+            return Ok(());
         }
 
         if session.output.pending() == 0 && !pending_tx.is_empty() && echoes.in_use() < ECHO_CREDITS
@@ -1033,5 +1089,70 @@ mod tests {
         drop(first);
         let _second = FakeDevice::open(Arc::clone(&claimed), Arc::clone(&stale)).unwrap();
         assert!(stale.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn closed_sender_preserves_queued_disable_frames_in_order() {
+        let (sender, receiver) = mpsc::sync_channel(TX_CAPACITY);
+        let frames: Vec<_> = (1..=7)
+            .map(|id| CanFrame::classical(id, &[0xff, 0xfd]).unwrap())
+            .collect();
+        for frame in &frames {
+            sender.send(*frame).unwrap();
+        }
+        drop(sender);
+        let mut pending = VecDeque::new();
+        assert!(receive_pending(&receiver, &mut pending));
+        assert_eq!(Vec::from(pending), frames);
+    }
+
+    #[test]
+    fn closing_a_full_queue_does_not_discard_its_last_batch() {
+        let (sender, receiver) = mpsc::sync_channel(TX_CAPACITY);
+        for _ in 0..TX_CAPACITY {
+            sender
+                .send(CanFrame::classical(1, &[0xfd]).unwrap())
+                .unwrap();
+        }
+        drop(sender);
+        let mut pending = VecDeque::new();
+        assert!(!receive_pending(&receiver, &mut pending));
+        assert_eq!(pending.len(), TX_CAPACITY);
+        pending.pop_front();
+        assert!(receive_pending(&receiver, &mut pending));
+        assert_eq!(pending.len(), TX_CAPACITY - 1);
+    }
+
+    #[test]
+    fn shutdown_waits_for_queue_usb_completion_and_can_echo() {
+        let now = Instant::now();
+        let mut drain = ShutdownDrain::default();
+        assert!(!drain.finished(now, 0, 0, 0).unwrap());
+        drain.request(now);
+        for (queued, submitted, echoes) in [(7, 0, 0), (0, 1, 1), (0, 0, 1)] {
+            assert!(!drain.finished(now, queued, submitted, echoes).unwrap());
+        }
+        assert!(drain.finished(now, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn missing_echo_times_out_without_extending_shutdown_deadline() {
+        let now = Instant::now();
+        let mut drain = ShutdownDrain::default();
+        drain.request(now);
+        drain.request(now + SHUTDOWN_DRAIN_TIMEOUT);
+        let error = drain
+            .finished(now + SHUTDOWN_DRAIN_TIMEOUT, 0, 0, 1)
+            .unwrap_err();
+        assert!(error.contains("1 CAN echoes outstanding"));
+        // An unplugged or silent adapter still reaches bounded cleanup.
+        assert!(drain
+            .finished(now + SHUTDOWN_DRAIN_TIMEOUT, 0, 0, 0)
+            .unwrap());
     }
 }
