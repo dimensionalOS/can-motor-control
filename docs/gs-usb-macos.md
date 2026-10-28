@@ -81,9 +81,15 @@ A disconnect, malformed transfer, invalid echo, or failed endpoint recovery
 faults the worker. The next send or drain reports `TransportError`; the worker
 does not reconnect. Drop the owning bus or robot and construct a new bus.
 
-Dropping the owner closes TX, cancels and collects queued USB transfers, resets
-channel 0, releases the interface, and joins the worker. There is no separate
-`close()` method.
+Dropping the owner closes TX and drains accepted frames, outstanding USB writes,
+and CAN TX echoes before cancelling the receive transfers and resetting channel 0.
+This preserves final motor-disable frames queued immediately before shutdown.
+Bulk-OUT completion alone does not prove the adapter transmitted a CAN frame.
+The drain has a one-second deadline; a silent CAN bus or unplugged adapter cannot
+hold shutdown indefinitely. Timeout or transfer failure is logged before cleanup.
+The interface is released and the worker joined. There is no separate `close()`
+method. Call `Robot.disable()` before dropping the robot: transport cleanup drains
+queued frames but does not generate motor-disable commands itself.
 
 ## Diagnostics
 
