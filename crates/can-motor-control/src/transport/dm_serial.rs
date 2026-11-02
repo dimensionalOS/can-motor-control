@@ -14,6 +14,11 @@
 //! The bridge carries eight data bytes and standard 11-bit IDs only, so this
 //! transport rejects extended IDs and shorter or FD payloads before any IO.
 //! The CAN bitrate is configured on the bridge itself, not over this protocol.
+//!
+//! The bridge parses one packet per USB transfer: measured on a reBot arm,
+//! seven packets in one write lost every reply, while seven back-to-back
+//! writes lost none. Each packet is therefore its own `write`, and a packet is
+//! never left half written.
 
 use std::ffi::CString;
 use std::io;
@@ -35,14 +40,12 @@ const RX_HEADER: [u8; 3] = [0xAA, 0x11, 0x08];
 const RX_TRAILER: u8 = 0x55;
 const PAYLOAD_LEN: usize = 8;
 const MAX_STANDARD_ID: u32 = 0x7FF;
-const SEND_RETRY_BUDGET: u32 = 64;
-const SEND_RETRY_SLEEP: Duration = Duration::from_micros(100);
+/// How long a send waits for room in the serial driver's write buffer.
+const SEND_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Default minimum gap between two packets written to the bridge.
-///
-/// The bridge does not acknowledge writes, and back-to-back packets can
-/// overrun its CAN transmit queue and drop frames silently.
-pub const DEFAULT_DM_SERIAL_FRAME_GAP: Duration = Duration::from_micros(500);
+/// Default minimum gap between two packets written to the bridge. Separate
+/// writes need no gap; a non-zero gap trades bus bandwidth for headroom.
+pub const DEFAULT_DM_SERIAL_FRAME_GAP: Duration = Duration::ZERO;
 
 /// Encode one classical CAN frame as a bridge transmit packet.
 pub fn encode_dm_serial_packet(frame: &CanFrame) -> Result<[u8; TX_PACKET_LEN], TransportError> {
@@ -126,6 +129,7 @@ pub struct DmSerialBus {
     parser: DmSerialParser,
     frame_gap: Duration,
     next_write_at: Instant,
+    broken: bool,
 }
 
 impl DmSerialBus {
@@ -152,6 +156,12 @@ impl DmSerialBus {
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
         // A second writer would interleave packets and corrupt both streams.
+        // TIOCEXCL refuses further opens of the tty, even from processes that
+        // ignore advisory locks; flock also covers opens that predate it.
+        // SAFETY: ioctl without an argument on an owned tty fd.
+        if unsafe { libc::ioctl(raw_fd, libc::TIOCEXCL as _) } < 0 {
+            return Err(TransportError::Io(io::Error::last_os_error()));
+        }
         // SAFETY: flock on an owned fd.
         if unsafe { libc::flock(raw_fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
             let err = io::Error::last_os_error();
@@ -174,36 +184,86 @@ impl DmSerialBus {
             parser: DmSerialParser::default(),
             frame_gap,
             next_write_at: Instant::now(),
+            broken: false,
         })
     }
 
+    /// Write one whole packet, waiting for room in the driver's buffer.
+    ///
+    /// A packet the driver refuses outright leaves the stream intact and
+    /// reports `SendBufferFull`. Once part of a packet is out, the tail must
+    /// follow: if it cannot, the stream is out of step with the bridge and
+    /// the bus refuses every later send.
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), TransportError> {
         let raw = self.fd.as_raw_fd();
+        let deadline = Instant::now() + SEND_TIMEOUT;
         let mut written = 0;
-        let mut retries = 0u32;
         while written < packet.len() {
             let rest = &packet[written..];
             // SAFETY: write() to an owned fd with a valid byte slice.
             let n = unsafe { libc::write(raw, rest.as_ptr() as *const libc::c_void, rest.len()) };
-            if n >= 0 {
+            if n > 0 {
                 written += n as usize;
                 continue;
             }
-            let err = io::Error::last_os_error();
+            let err = if n == 0 {
+                io::Error::from(io::ErrorKind::WriteZero)
+            } else {
+                io::Error::last_os_error()
+            };
             match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
                 Some(libc::EAGAIN) => {
-                    retries += 1;
-                    if retries >= SEND_RETRY_BUDGET {
+                    let now = Instant::now();
+                    if now < deadline && wait_writable(raw, deadline - now)? {
+                        continue;
+                    }
+                    if written == 0 {
                         return Err(TransportError::SendBufferFull);
                     }
-                    thread::sleep(SEND_RETRY_SLEEP);
                 }
-                Some(libc::EINTR) => {}
-                _ => return Err(TransportError::Io(err)),
+                _ => {}
             }
+            if written > 0 {
+                self.broken = true;
+            }
+            return Err(if err.raw_os_error() == Some(libc::EAGAIN) {
+                TransportError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{}: packet left half written", self.name),
+                ))
+            } else {
+                TransportError::Io(err)
+            });
         }
         Ok(())
     }
+}
+
+/// Wait until `fd` accepts writes or `timeout` passes; true when writable.
+fn wait_writable(fd: RawFd, timeout: Duration) -> Result<bool, TransportError> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+    // SAFETY: poll on one valid pollfd for the duration of the call.
+    let rc = unsafe { libc::poll(&mut pollfd, 1, millis) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            return Ok(false);
+        }
+        return Err(TransportError::Io(err));
+    }
+    if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(TransportError::Io(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "serial device hung up",
+        )));
+    }
+    Ok(pollfd.revents & libc::POLLOUT != 0)
 }
 
 fn configure_raw(fd: RawFd) -> Result<(), TransportError> {
@@ -252,6 +312,12 @@ impl CanBus for DmSerialBus {
 
     fn send(&mut self, frame: &CanFrame) -> Result<(), TransportError> {
         let packet = encode_dm_serial_packet(frame)?;
+        if self.broken {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{}: stream out of step after a partial packet", self.name),
+            )));
+        }
         let now = Instant::now();
         if now < self.next_write_at {
             thread::sleep(self.next_write_at - now);
@@ -371,8 +437,9 @@ mod tests {
         assert_eq!(parser.pending_len(), 0);
     }
 
-    #[test]
-    fn exchanges_packets_over_a_pseudo_terminal() {
+    /// A pseudo-terminal master and the path of its slave, standing in for
+    /// the bridge's serial port.
+    fn pseudo_terminal() -> (OwnedFd, String) {
         // SAFETY: standard pseudo-terminal setup on a fresh master fd.
         let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
         assert!(master >= 0);
@@ -385,20 +452,49 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
+        (master, slave)
+    }
 
+    #[test]
+    fn second_open_of_the_same_port_is_refused() {
+        let (_master, slave) = pseudo_terminal();
+        let _bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
+        assert!(DmSerialBus::open(&slave, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn hang_up_surfaces_as_a_transport_error() {
+        let (master, slave) = pseudo_terminal();
+        let mut bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
+        drop(master);
+        assert!(matches!(
+            bus.drain_inbound_nonblocking(),
+            Err(TransportError::Io(_))
+        ));
+        let frame = CanFrame::classical(0x01, &[0; 8]).unwrap();
+        assert!(bus.send(&frame).is_err());
+    }
+
+    #[test]
+    fn exchanges_packets_over_a_pseudo_terminal() {
+        let (master, slave) = pseudo_terminal();
         let mut bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
         let frame = CanFrame::classical(0x7FF, &[1, 0, 0xCC, 0, 0, 0, 0, 0]).unwrap();
         bus.send(&frame).unwrap();
         let mut sent = [0u8; TX_PACKET_LEN];
-        // SAFETY: read() into a local buffer from the owned master fd.
-        let n = unsafe {
-            libc::read(
-                master.as_raw_fd(),
-                sent.as_mut_ptr() as *mut libc::c_void,
-                TX_PACKET_LEN,
-            )
-        };
-        assert_eq!(n as usize, TX_PACKET_LEN);
+        let mut got = 0;
+        while got < TX_PACKET_LEN {
+            // SAFETY: read() into the unfilled tail of a local buffer.
+            let n = unsafe {
+                libc::read(
+                    master.as_raw_fd(),
+                    sent[got..].as_mut_ptr() as *mut libc::c_void,
+                    TX_PACKET_LEN - got,
+                )
+            };
+            assert!(n > 0, "pty read failed");
+            got += n as usize;
+        }
         assert_eq!(sent, encode_dm_serial_packet(&frame).unwrap());
 
         let reply = rx_packet(0x11, [0x11, 0x80, 0x00, 0x80, 0x08, 0x00, 30, 31]);

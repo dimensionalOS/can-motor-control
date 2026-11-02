@@ -107,9 +107,9 @@ impl PySocketCanBus {
 /// The bridge enumerates as a serial port (``/dev/ttyACM0`` on Linux,
 /// ``/dev/cu.usbmodem*`` on macOS) and wraps each CAN frame in Damiao's
 /// serial packet format. Opens ``path`` exclusively on construction; a
-/// failure to open raises `TransportError`. ``frame_gap`` is the minimum
-/// time in seconds between two packets written to the bridge, which does
-/// not acknowledge writes and drops frames when they arrive too fast. Pass
+/// failure to open raises `TransportError`. Each packet goes out as its own
+/// write, which is what the bridge needs; ``frame_gap`` optionally adds a
+/// minimum time in seconds between two packets (default 0). Pass
 /// it to `RobotBuilder.add_bus`. A bus is consumed by the builder and may
 /// be added to only one robot.
 #[pyclass(name = "DmSerialBus", module = "can_motor_control")]
@@ -127,14 +127,11 @@ impl PyDmSerialBus {
     fn new(py: Python<'_>, path: &str, frame_gap: Option<f64>) -> PyResult<Self> {
         let frame_gap = match frame_gap {
             None => DEFAULT_DM_SERIAL_FRAME_GAP,
-            Some(seconds) if seconds.is_finite() && seconds >= 0.0 => {
-                std::time::Duration::from_secs_f64(seconds)
-            }
-            Some(_) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "frame_gap must be finite and non-negative",
-                ))
-            }
+            Some(seconds) => std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "frame_gap must be a finite, non-negative number of seconds",
+                )
+            })?,
         };
         let bus = py.allow_threads(|| DmSerialBus::open(path, frame_gap));
         let bus = bus.map_err(transport_to_pyerr)?;

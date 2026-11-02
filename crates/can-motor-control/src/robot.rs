@@ -254,6 +254,17 @@ impl Robot {
         else {
             return Ok(());
         };
+        let travel = self
+            .groups
+            .get(name)
+            .and_then(GroupKind::as_gripper)
+            .map_or(0.0, Gripper::opening_calibration_travel);
+        if !travel.is_finite() || travel <= 0.0 {
+            return Err(Error::OpeningCalibrationFailed {
+                name: name.to_string(),
+                reason: format!("calibration travel must be finite and > 0.0 rad, got {travel}"),
+            });
+        }
 
         self.refresh_gripper_feedback(name)?;
 
@@ -1421,6 +1432,37 @@ mod tests {
         let closed = gripper.opening_position(0.0).unwrap();
         let open = gripper.opening_position(1.0).unwrap();
         assert!((open - closed - 6.0).abs() < 1e-9, "span {}", open - closed);
+    }
+
+    #[test]
+    fn enable_rejects_invalid_calibration_travel_before_moving() {
+        for travel in [0.0, -1.0, f64::NAN] {
+            let mut robot = RobotBuilder::new()
+                .add_bus(
+                    "main",
+                    Box::new(MockCanBus::new("m")),
+                    Box::new(EchoFeedbackCodec::new()),
+                )
+                .add_gripper_with_opening(
+                    "g",
+                    "main",
+                    motor("g0", 0x05, 0x18),
+                    GripperOpeningSpec::new(OpeningDirection::IncreasingPosition, Some(0.2))
+                        .with_calibration_travel(travel),
+                )
+                .build()
+                .unwrap();
+            robot.connect().unwrap();
+            let err = robot.enable().unwrap_err();
+            assert!(
+                matches!(err, Error::OpeningCalibrationFailed { .. }),
+                "travel {travel}: {err:?}"
+            );
+            // The echo codec reflects any position command back as feedback.
+            robot.tick(Duration::ZERO).unwrap();
+            let gripper = robot.group("g").and_then(|g| g.as_gripper()).unwrap();
+            assert_eq!(gripper.motor().position(), 0.0, "travel {travel}");
+        }
     }
 
     fn lifecycle_robot(reply: Option<u32>) -> (Robot, MockCanBus) {

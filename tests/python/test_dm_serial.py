@@ -37,10 +37,19 @@ def feedback_packet(recv_id: int, payload: bytes) -> bytes:
     return b"\xaa\x11\x08" + struct.pack("<I", recv_id) + payload + b"\x55"
 
 
-def test_rejects_negative_frame_gap(bridge):
+@pytest.mark.parametrize("frame_gap", [-1.0, float("nan"), float("inf"), 1e30])
+def test_rejects_invalid_frame_gap(bridge, frame_gap):
     _, path = bridge
     with pytest.raises(ValueError):
-        can_motor_control.DmSerialBus(path, frame_gap=-1.0)
+        can_motor_control.DmSerialBus(path, frame_gap=frame_gap)
+
+
+def test_second_open_of_the_same_port_raises_transport_error(bridge):
+    _, path = bridge
+    first = can_motor_control.DmSerialBus(path)
+    with pytest.raises(can_motor_control.TransportError):
+        can_motor_control.DmSerialBus(path)
+    del first
 
 
 def test_missing_device_raises_transport_error():
