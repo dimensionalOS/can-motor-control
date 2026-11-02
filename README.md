@@ -125,8 +125,9 @@ The architecture, every requirement, and the implementation plan live under [`op
 | --- | --- | --- |
 | Linux | `SocketCanBus` | Classical CAN and CAN-FD |
 | macOS | `GsUsbBus` | gs_usb channel 0, classical CAN |
+| Linux, macOS | `DmSerialBus` | Damiao USB-CAN serial bridge (2e88:4603), classical CAN, standard IDs, 8-byte payloads |
 
-Each build exports only its native hardware transport. Both export
+Each build exports its native CAN transport and `DmSerialBus`. Both export
 `MockCanBus`. The macOS wheel uses IOKit through Rust `nusb`; it requires no
 Homebrew libusb, PyUSB, or Python gs_usb package.
 

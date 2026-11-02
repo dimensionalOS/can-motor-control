@@ -47,6 +47,9 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(50);
 /// writes need no gap; a non-zero gap trades bus bandwidth for headroom.
 pub const DEFAULT_DM_SERIAL_FRAME_GAP: Duration = Duration::ZERO;
 
+/// Largest accepted frame gap; longer gaps would stall the control loop.
+pub const MAX_DM_SERIAL_FRAME_GAP: Duration = Duration::from_secs(1);
+
 /// Encode one classical CAN frame as a bridge transmit packet.
 pub fn encode_dm_serial_packet(frame: &CanFrame) -> Result<[u8; TX_PACKET_LEN], TransportError> {
     if frame.is_fd() {
@@ -136,10 +139,16 @@ impl DmSerialBus {
     /// Open the bridge's serial device, for example `/dev/ttyACM0`.
     ///
     /// The port is opened exclusively in raw mode. `frame_gap` is the minimum
-    /// time between two packets written to the bridge.
+    /// time between two packets written to the bridge, at most
+    /// [`MAX_DM_SERIAL_FRAME_GAP`].
     pub fn open(path: impl AsRef<Path>, frame_gap: Duration) -> Result<Self, TransportError> {
         let path = path.as_ref();
         let name = path.display().to_string();
+        if frame_gap > MAX_DM_SERIAL_FRAME_GAP {
+            return Err(TransportError::InvalidConfiguration(format!(
+                "frame gap {frame_gap:?} exceeds {MAX_DM_SERIAL_FRAME_GAP:?}"
+            )));
+        }
         let cpath = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| TransportError::InterfaceNotFound(name.clone()))?;
         // SAFETY: open() with a valid NUL-terminated path; returns -1 on error.
@@ -156,21 +165,20 @@ impl DmSerialBus {
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
         // A second writer would interleave packets and corrupt both streams.
-        // TIOCEXCL refuses further opens of the tty, even from processes that
-        // ignore advisory locks; flock also covers opens that predate it.
-        // SAFETY: ioctl without an argument on an owned tty fd.
-        if unsafe { libc::ioctl(raw_fd, libc::TIOCEXCL as _) } < 0 {
-            return Err(TransportError::Io(io::Error::last_os_error()));
-        }
+        // flock first, so a port another process holds is left untouched;
+        // then TIOCEXCL refuses later opens, even by processes that ignore
+        // advisory locks.
         // SAFETY: flock on an owned fd.
         if unsafe { libc::flock(raw_fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Err(TransportError::InvalidConfiguration(format!(
-                    "{name} is already open in another process"
-                )));
+                return Err(already_open(&name));
             }
             return Err(TransportError::Io(err));
+        }
+        // SAFETY: ioctl without an argument on an owned tty fd.
+        if unsafe { libc::ioctl(raw_fd, libc::TIOCEXCL as _) } < 0 {
+            return Err(TransportError::Io(io::Error::last_os_error()));
         }
         configure_raw(raw_fd)?;
         // Drop bytes queued before this process owned the port.
@@ -191,79 +199,91 @@ impl DmSerialBus {
     /// Write one whole packet, waiting for room in the driver's buffer.
     ///
     /// A packet the driver refuses outright leaves the stream intact and
-    /// reports `SendBufferFull`. Once part of a packet is out, the tail must
-    /// follow: if it cannot, the stream is out of step with the bridge and
-    /// the bus refuses every later send.
+    /// reports `SendBufferFull`. Once part of a packet is out, any failure
+    /// leaves the stream out of step with the bridge, so the bus refuses
+    /// every later send.
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), TransportError> {
-        let raw = self.fd.as_raw_fd();
-        let deadline = Instant::now() + SEND_TIMEOUT;
         let mut written = 0;
-        while written < packet.len() {
-            let rest = &packet[written..];
-            // SAFETY: write() to an owned fd with a valid byte slice.
-            let n = unsafe { libc::write(raw, rest.as_ptr() as *const libc::c_void, rest.len()) };
-            if n > 0 {
-                written += n as usize;
-                continue;
-            }
-            let err = if n == 0 {
-                io::Error::from(io::ErrorKind::WriteZero)
-            } else {
-                io::Error::last_os_error()
-            };
-            match err.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => {
-                    let now = Instant::now();
-                    if now < deadline && wait_writable(raw, deadline - now)? {
-                        continue;
-                    }
-                    if written == 0 {
-                        return Err(TransportError::SendBufferFull);
-                    }
-                }
-                _ => {}
-            }
-            if written > 0 {
-                self.broken = true;
-            }
-            return Err(if err.raw_os_error() == Some(libc::EAGAIN) {
-                TransportError::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("{}: packet left half written", self.name),
-                ))
-            } else {
-                TransportError::Io(err)
-            });
+        let result = write_whole(self.fd.as_raw_fd(), packet, &mut written);
+        if result.is_err() && written > 0 {
+            self.broken = true;
         }
-        Ok(())
+        result
     }
 }
 
-/// Wait until `fd` accepts writes or `timeout` passes; true when writable.
-fn wait_writable(fd: RawFd, timeout: Duration) -> Result<bool, TransportError> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    let millis = timeout.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
-    // SAFETY: poll on one valid pollfd for the duration of the call.
-    let rc = unsafe { libc::poll(&mut pollfd, 1, millis) };
-    if rc < 0 {
+fn write_whole(fd: RawFd, packet: &[u8], written: &mut usize) -> Result<(), TransportError> {
+    let deadline = Instant::now() + SEND_TIMEOUT;
+    while *written < packet.len() {
+        let rest = &packet[*written..];
+        // SAFETY: write() to an owned fd with a valid byte slice.
+        let n = unsafe { libc::write(fd, rest.as_ptr() as *const libc::c_void, rest.len()) };
+        if n > 0 {
+            *written += n as usize;
+            continue;
+        }
+        if n == 0 {
+            return Err(TransportError::Io(io::ErrorKind::WriteZero.into()));
+        }
         let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINTR) {
+        match err.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EAGAIN) => {
+                if wait_writable(fd, deadline)? {
+                    continue;
+                }
+                return Err(if *written == 0 {
+                    TransportError::SendBufferFull
+                } else {
+                    TransportError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "packet left half written",
+                    ))
+                });
+            }
+            _ => return Err(TransportError::Io(err)),
+        }
+    }
+    Ok(())
+}
+
+/// Wait until `fd` accepts writes; false once `deadline` passes.
+fn wait_writable(fd: RawFd, deadline: Instant) -> Result<bool, TransportError> {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
             return Ok(false);
         }
-        return Err(TransportError::Io(err));
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = (deadline - now).as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+        // SAFETY: poll on one valid pollfd for the duration of the call.
+        let rc = unsafe { libc::poll(&mut pollfd, 1, millis) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(TransportError::Io(err));
+        }
+        if rc == 0 {
+            return Ok(false);
+        }
+        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "serial device hung up",
+            )));
+        }
+        return Ok(pollfd.revents & libc::POLLOUT != 0);
     }
-    if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-        return Err(TransportError::Io(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "serial device hung up",
-        )));
-    }
-    Ok(pollfd.revents & libc::POLLOUT != 0)
+}
+
+fn already_open(name: &str) -> TransportError {
+    TransportError::InvalidConfiguration(format!("{name} is already open in another process"))
 }
 
 fn configure_raw(fd: RawFd) -> Result<(), TransportError> {
@@ -293,6 +313,8 @@ fn configure_raw(fd: RawFd) -> Result<(), TransportError> {
 
 fn map_open_error(e: io::Error, name: &str) -> TransportError {
     match e.raw_os_error() {
+        // TIOCEXCL set by the process that holds the port.
+        Some(libc::EBUSY) => already_open(name),
         Some(libc::EACCES) | Some(libc::EPERM) => TransportError::PermissionDenied,
         Some(libc::ENOENT) | Some(libc::ENODEV) | Some(libc::ENXIO) => {
             TransportError::InterfaceNotFound(name.to_string())
@@ -459,7 +481,36 @@ mod tests {
     fn second_open_of_the_same_port_is_refused() {
         let (_master, slave) = pseudo_terminal();
         let _bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
-        assert!(DmSerialBus::open(&slave, Duration::ZERO).is_err());
+        assert!(matches!(
+            DmSerialBus::open(&slave, Duration::ZERO),
+            Err(TransportError::InvalidConfiguration(message)) if message.contains("already open")
+        ));
+        // TIOCEXCL also refuses a plain open that ignores advisory locks.
+        // Root bypasses TIOCEXCL, so only check this unprivileged.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            let cpath = CString::new(slave).unwrap();
+            // SAFETY: open() with a valid NUL-terminated path.
+            let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+            let err = io::Error::last_os_error();
+            if fd >= 0 {
+                // SAFETY: closing the fd this test just opened.
+                unsafe { libc::close(fd) };
+            }
+            assert!(
+                fd < 0 && err.raw_os_error() == Some(libc::EBUSY),
+                "plain open: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_frame_gap_beyond_the_maximum() {
+        let (_master, slave) = pseudo_terminal();
+        assert!(matches!(
+            DmSerialBus::open(&slave, MAX_DM_SERIAL_FRAME_GAP + Duration::from_nanos(1)),
+            Err(TransportError::InvalidConfiguration(_))
+        ));
     }
 
     #[test]
@@ -484,6 +535,13 @@ mod tests {
         let mut sent = [0u8; TX_PACKET_LEN];
         let mut got = 0;
         while got < TX_PACKET_LEN {
+            let mut pollfd = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll on one valid pollfd; fail instead of hanging.
+            assert_eq!(unsafe { libc::poll(&mut pollfd, 1, 1000) }, 1, "no packet");
             // SAFETY: read() into the unfilled tail of a local buffer.
             let n = unsafe {
                 libc::read(

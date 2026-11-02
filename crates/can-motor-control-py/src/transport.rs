@@ -10,7 +10,7 @@ use can_motor_control::{
 };
 use can_motor_control::{CanBus, MockCanBus};
 #[cfg(unix)]
-use can_motor_control::{DmSerialBus, DEFAULT_DM_SERIAL_FRAME_GAP};
+use can_motor_control::{DmSerialBus, DEFAULT_DM_SERIAL_FRAME_GAP, MAX_DM_SERIAL_FRAME_GAP};
 use pyo3::prelude::*;
 
 use crate::errors::transport_to_pyerr;
@@ -109,7 +109,7 @@ impl PySocketCanBus {
 /// serial packet format. Opens ``path`` exclusively on construction; a
 /// failure to open raises `TransportError`. Each packet goes out as its own
 /// write, which is what the bridge needs; ``frame_gap`` optionally adds a
-/// minimum time in seconds between two packets (default 0). Pass
+/// minimum time in seconds between two packets (default 0, at most 1). Pass
 /// it to `RobotBuilder.add_bus`. A bus is consumed by the builder and may
 /// be added to only one robot.
 #[pyclass(name = "DmSerialBus", module = "can_motor_control")]
@@ -127,11 +127,15 @@ impl PyDmSerialBus {
     fn new(py: Python<'_>, path: &str, frame_gap: Option<f64>) -> PyResult<Self> {
         let frame_gap = match frame_gap {
             None => DEFAULT_DM_SERIAL_FRAME_GAP,
-            Some(seconds) => std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "frame_gap must be a finite, non-negative number of seconds",
-                )
-            })?,
+            Some(seconds) => std::time::Duration::try_from_secs_f64(seconds)
+                .ok()
+                .filter(|gap| *gap <= MAX_DM_SERIAL_FRAME_GAP)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "frame_gap must be between 0 and {} seconds, got {seconds}",
+                        MAX_DM_SERIAL_FRAME_GAP.as_secs_f64()
+                    ))
+                })?,
         };
         let bus = py.allow_threads(|| DmSerialBus::open(path, frame_gap));
         let bus = bus.map_err(transport_to_pyerr)?;

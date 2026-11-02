@@ -1454,8 +1454,11 @@ mod tests {
                 .unwrap();
             robot.connect().unwrap();
             let err = robot.enable().unwrap_err();
+            // The reason pins the travel check; a zero travel would otherwise
+            // also fail later, on the minimum calibrated span.
             assert!(
-                matches!(err, Error::OpeningCalibrationFailed { .. }),
+                matches!(&err, Error::OpeningCalibrationFailed { reason, .. }
+                    if reason.contains("calibration travel")),
                 "travel {travel}: {err:?}"
             );
             // The echo codec reflects any position command back as feedback.

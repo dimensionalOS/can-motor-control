@@ -37,7 +37,7 @@ def feedback_packet(recv_id: int, payload: bytes) -> bytes:
     return b"\xaa\x11\x08" + struct.pack("<I", recv_id) + payload + b"\x55"
 
 
-@pytest.mark.parametrize("frame_gap", [-1.0, float("nan"), float("inf"), 1e30])
+@pytest.mark.parametrize("frame_gap", [-1.0, float("nan"), float("inf"), 1.5, 1e19, 1e30])
 def test_rejects_invalid_frame_gap(bridge, frame_gap):
     _, path = bridge
     with pytest.raises(ValueError):

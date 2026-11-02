@@ -17,6 +17,7 @@ mod socketcan;
 #[cfg(unix)]
 pub use dm_serial::{
     encode_dm_serial_packet, DmSerialBus, DmSerialParser, DEFAULT_DM_SERIAL_FRAME_GAP,
+    MAX_DM_SERIAL_FRAME_GAP,
 };
 #[cfg(target_os = "macos")]
 pub use gs_usb::GsUsbStatistics;
