@@ -33,6 +33,10 @@ class MockCanBus:
     @staticmethod
     def new_fd(name: str) -> "MockCanBus": ...
 
+if sys.platform in ("linux", "darwin"):
+    class DmSerialBus:
+        def __init__(self, path: str, *, frame_gap: float | None = None) -> None: ...
+
 if sys.platform == "linux":
     class SocketCanBus:
         def __init__(self, interface: str, fd: bool = False) -> None: ...
@@ -142,6 +146,7 @@ class RobotBuilder:
         motor: MotorSpec,
         opening_direction: str | None = None,
         default_current: float | None = None,
+        calibration_travel: float | None = None,
     ) -> "RobotBuilder": ...
     def add_generic(
         self, name: str, *, bus: str, motors: list[MotorSpec]

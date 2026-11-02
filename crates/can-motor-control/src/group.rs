@@ -528,6 +528,12 @@ impl Gripper {
         self.opening.map(|opening| opening.spec.direction.sign())
     }
 
+    pub(crate) fn opening_calibration_travel(&self) -> f64 {
+        self.opening
+            .and_then(|opening| opening.spec.calibration_travel)
+            .unwrap_or(OPENING_CALIBRATION_TRAVEL_RAD)
+    }
+
     pub(crate) fn clear_opening_calibration(&mut self) {
         if let Some(opening) = self.opening.as_mut() {
             opening.calibration = None;

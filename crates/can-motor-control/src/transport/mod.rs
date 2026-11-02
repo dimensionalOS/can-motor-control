@@ -6,12 +6,18 @@ use std::os::fd::RawFd;
 use motor_codec::{BusCapabilities, CanFrame, FrameError};
 use thiserror::Error;
 
+#[cfg(unix)]
+mod dm_serial;
 mod gs_usb;
 mod mock;
 mod poller;
 #[cfg(target_os = "linux")]
 mod socketcan;
 
+#[cfg(unix)]
+pub use dm_serial::{
+    encode_dm_serial_packet, DmSerialBus, DmSerialParser, DEFAULT_DM_SERIAL_FRAME_GAP,
+};
 #[cfg(target_os = "macos")]
 pub use gs_usb::GsUsbStatistics;
 #[cfg(target_os = "macos")]

@@ -19,6 +19,9 @@ from can_motor_control._native import (
     LifecycleError,
 )
 
+if sys.platform in ("linux", "darwin"):
+    from can_motor_control._native import DmSerialBus
+
 if sys.platform == "linux":
     from can_motor_control._native import SocketCanBus
 elif sys.platform == "darwin":
@@ -48,6 +51,9 @@ __all__ = [
     "LifecycleError",
     "damiao",
 ]
+
+if sys.platform in ("linux", "darwin"):
+    __all__.append("DmSerialBus")
 
 if sys.platform == "linux":
     __all__.append("SocketCanBus")

@@ -32,6 +32,8 @@ pub use transport::SocketCanBus;
 #[cfg(target_os = "macos")]
 pub use transport::{list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo, GsUsbStatistics};
 pub use transport::{BusPoller, CanBus, MockCanBus, MockRecordedCall, TransportError};
+#[cfg(unix)]
+pub use transport::{DmSerialBus, DEFAULT_DM_SERIAL_FRAME_GAP};
 
 // Re-export can-motor-codec public types so users have a single import surface.
 pub use motor_codec::{

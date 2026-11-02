@@ -23,6 +23,8 @@ use codec::{PyDamiaoCodec, PyMockFeedbackCodec, PyMotorProfile, PyMotorType};
 use frame::PyCanFrame;
 use robot::{PyArm, PyGripper, PyMotor, PyMotorGroup, PyRobot, PyRobotBuilder};
 use spec::PyMotorSpec;
+#[cfg(unix)]
+use transport::PyDmSerialBus;
 use transport::PyMockCanBus;
 #[cfg(target_os = "linux")]
 use transport::PySocketCanBus;
@@ -73,6 +75,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Classes.
     m.add_class::<PyCanFrame>()?;
     m.add_class::<PyMockCanBus>()?;
+    #[cfg(unix)]
+    m.add_class::<PyDmSerialBus>()?;
     #[cfg(target_os = "linux")]
     m.add_class::<PySocketCanBus>()?;
     #[cfg(target_os = "macos")]

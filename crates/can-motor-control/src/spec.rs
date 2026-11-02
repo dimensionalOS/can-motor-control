@@ -28,6 +28,10 @@ pub struct GripperOpeningSpec {
     pub direction: OpeningDirection,
     /// Default per-unit current used when opening commands omit one.
     pub default_current: Option<f64>,
+    /// Commanded travel in radians toward each stop during calibration.
+    /// `None` uses the library default of 4.0 rad. Set it above the
+    /// mechanism's full stroke so both stops are reached from any start.
+    pub calibration_travel: Option<f64>,
 }
 
 impl GripperOpeningSpec {
@@ -36,7 +40,14 @@ impl GripperOpeningSpec {
         Self {
             direction,
             default_current,
+            calibration_travel: None,
         }
+    }
+
+    /// Override the calibration travel toward each stop, in radians.
+    pub fn with_calibration_travel(mut self, travel: f64) -> Self {
+        self.calibration_travel = Some(travel);
+        self
     }
 }
 

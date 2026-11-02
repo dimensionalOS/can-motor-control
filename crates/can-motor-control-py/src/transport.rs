@@ -9,6 +9,8 @@ use can_motor_control::{
     list_gs_usb_devices, GsUsbBus, GsUsbConfig, GsUsbDeviceInfo, GsUsbStatistics,
 };
 use can_motor_control::{CanBus, MockCanBus};
+#[cfg(unix)]
+use can_motor_control::{DmSerialBus, DEFAULT_DM_SERIAL_FRAME_GAP};
 use pyo3::prelude::*;
 
 use crate::errors::transport_to_pyerr;
@@ -93,6 +95,48 @@ impl PySocketCanBus {
     fn new(py: Python<'_>, interface: &str, fd: bool) -> PyResult<Self> {
         // Release the GIL during the syscall.
         let bus = py.allow_threads(|| SocketCanBus::open(interface, fd));
+        let bus = bus.map_err(transport_to_pyerr)?;
+        Ok(Self {
+            handle: TransportHandle::new(bus),
+        })
+    }
+}
+
+/// A classical CAN bus behind a Damiao USB-CAN serial bridge.
+///
+/// The bridge enumerates as a serial port (``/dev/ttyACM0`` on Linux,
+/// ``/dev/cu.usbmodem*`` on macOS) and wraps each CAN frame in Damiao's
+/// serial packet format. Opens ``path`` exclusively on construction; a
+/// failure to open raises `TransportError`. ``frame_gap`` is the minimum
+/// time in seconds between two packets written to the bridge, which does
+/// not acknowledge writes and drops frames when they arrive too fast. Pass
+/// it to `RobotBuilder.add_bus`. A bus is consumed by the builder and may
+/// be added to only one robot.
+#[pyclass(name = "DmSerialBus", module = "can_motor_control")]
+#[cfg(unix)]
+pub struct PyDmSerialBus {
+    pub(crate) handle: TransportHandle,
+}
+
+#[pymethods]
+#[cfg(unix)]
+impl PyDmSerialBus {
+    /// Open the bridge's serial device ``path``.
+    #[new]
+    #[pyo3(signature = (path, *, frame_gap=None))]
+    fn new(py: Python<'_>, path: &str, frame_gap: Option<f64>) -> PyResult<Self> {
+        let frame_gap = match frame_gap {
+            None => DEFAULT_DM_SERIAL_FRAME_GAP,
+            Some(seconds) if seconds.is_finite() && seconds >= 0.0 => {
+                std::time::Duration::from_secs_f64(seconds)
+            }
+            Some(_) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "frame_gap must be finite and non-negative",
+                ))
+            }
+        };
+        let bus = py.allow_threads(|| DmSerialBus::open(path, frame_gap));
         let bus = bus.map_err(transport_to_pyerr)?;
         Ok(Self {
             handle: TransportHandle::new(bus),
