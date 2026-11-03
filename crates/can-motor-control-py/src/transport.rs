@@ -107,8 +107,9 @@ impl PySocketCanBus {
 /// The bridge enumerates as a serial port (``/dev/ttyACM0`` on Linux,
 /// ``/dev/cu.usbmodem*`` on macOS) and wraps each CAN frame in Damiao's
 /// serial packet format. Opens ``path`` exclusively on construction; a
-/// failure to open raises `TransportError`. Each packet goes out as its own
-/// write, which is what the bridge needs; ``frame_gap`` optionally adds a
+/// failure to open raises `TransportError`. Packets use separate writes as a
+/// workaround verified on the tested bridge; tty writes do not define USB
+/// transfer boundaries. ``frame_gap`` optionally adds a
 /// minimum time in seconds between two packets (default 0, at most 1). Pass
 /// it to `RobotBuilder.add_bus`. A bus is consumed by the builder and may
 /// be added to only one robot.

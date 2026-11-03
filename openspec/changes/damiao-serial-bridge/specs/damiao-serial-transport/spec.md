@@ -14,7 +14,7 @@
 
 ### Requirement: Each packet is one whole write
 
-The bridge parses one packet per USB transfer, so `DmSerialBus` SHALL write each packet with its own write and MUST NOT batch packets. A packet the driver refuses outright SHALL report `SendBufferFull` and leave the stream intact. Once part of a packet is written, any failure to write the rest SHALL leave the bus refusing every later send.
+On the tested bridge, a tty write containing seven packets lost every reply, while seven separate writes lost none. This observation does not establish the USB-transfer boundaries or firmware parsing mechanism. As a workaround, `DmSerialBus` SHALL start each packet with its own write and MUST NOT batch packets. Partial writes SHALL be completed before starting another packet. A packet the driver refuses outright SHALL report `SendBufferFull` and leave the stream intact. Once part of a packet is written, any failure to write the rest SHALL leave the bus refusing every later send.
 
 #### Scenario: Partial packet cannot complete
 - **WHEN** a write accepts part of a packet and the rest cannot be written before the send timeout

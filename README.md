@@ -4,7 +4,9 @@ Rust control library for Damiao-family CAN motors, with first-class Python bindi
 
 ## Status
 
-v0.1.0 (in development) — single-arm control over Linux SocketCAN or native macOS gs_usb. Linux supports CAN-FD; macOS gs_usb supports classical CAN. See [`docs/can-fd.md`](./docs/can-fd.md) and [`docs/gs-usb-macos.md`](./docs/gs-usb-macos.md).
+v0.1.0 (in development). Hardware transports are Linux SocketCAN, native macOS
+gs_usb, and the Damiao USB2CAN serial bridge on Linux and macOS. An in-memory
+mock is also available. See [CAN transports](docs/transports.md) for their scope.
 
 ## Why
 
@@ -121,15 +123,17 @@ The architecture, every requirement, and the implementation plan live under [`op
 
 ## Platforms
 
-| Target | Hardware transport | Scope |
+| Transport | Supported host | Scope |
 | --- | --- | --- |
-| Linux | `SocketCanBus` | Classical CAN and CAN-FD |
-| macOS | `GsUsbBus` | gs_usb channel 0, classical CAN |
-| Linux, macOS | `DmSerialBus` | Damiao USB-CAN serial bridge (2e88:4603), classical CAN, standard IDs, 8-byte payloads |
+| `SocketCanBus` | Linux | Kernel SocketCAN interface; classical CAN and CAN-FD |
+| `GsUsbBus` | macOS | Adapter running gs_usb firmware; channel 0, classical CAN |
+| `DmSerialBus` | Linux, macOS | Damiao USB2CAN serial bridge; backend supports standard 8-byte data frames |
+| `MockCanBus` | Linux, macOS | In-memory classical or FD loopback; no hardware |
 
-Each build exports its native CAN transport and `DmSerialBus`. Both export
-`MockCanBus`. The macOS wheel uses IOKit through Rust `nusb`; it requires no
-Homebrew libusb, PyUSB, or Python gs_usb package.
+See [CAN transports](docs/transports.md) for the Rust and Python constructors,
+platform gates, build commands, bitrate settings, prerequisites, and limitations.
+These transports are implemented in this branch; a published release must include
+the relevant implementation before its wheel can expose the API.
 
 ## License
 

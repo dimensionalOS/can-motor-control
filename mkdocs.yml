@@ -65,6 +65,8 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Guides:
+      - CAN transports: transports.md
+      - Native macOS gs_usb: gs-usb-macos.md
       - SocketCAN setup: socketcan-setup.md
       - Gripper opening: gripper-opening.md
       - CAN-FD: can-fd.md

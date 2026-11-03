@@ -11,14 +11,17 @@
 //! - bridge to host, 16 bytes: `AA 11 08`, CAN ID (u32 LE), eight data bytes,
 //!   `55`.
 //!
-//! The bridge carries eight data bytes and standard 11-bit IDs only, so this
-//! transport rejects extended IDs and shorter or FD payloads before any IO.
-//! The CAN bitrate is configured on the bridge itself, not over this protocol.
+//! This backend supports standard 11-bit data frames with exactly eight bytes.
+//! It rejects extended IDs, remote frames, other lengths and FD frames before IO.
+//! The bridge protocol also defines extended IDs, remote frames, variable lengths
+//! and a CAN-bitrate command; this backend does not implement those options.
+//! Configure the bridge CAN bitrate separately before opening it here.
 //!
-//! The bridge parses one packet per USB transfer: measured on a reBot arm,
-//! seven packets in one write lost every reply, while seven back-to-back
-//! writes lost none. Each packet is therefore its own `write`, and a packet is
-//! never left half written.
+//! On a reBot arm, seven packets in one tty write lost every reply, while
+//! seven back-to-back writes lost none. This backend therefore writes packets
+//! separately as a workaround for the tested bridge firmware. A tty write does
+//! not guarantee a USB-transfer boundary; the firmware parsing mechanism has
+//! not been established. Partial writes are completed or the bus is faulted.
 
 use std::ffi::CString;
 use std::io;
