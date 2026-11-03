@@ -18,6 +18,8 @@ use pyo3::types::{PyAnyMethods, PyList};
 use crate::codec::{PyDamiaoCodec, PyMockFeedbackCodec};
 use crate::errors::into_pyerr;
 use crate::spec::PyMotorSpec;
+#[cfg(unix)]
+use crate::transport::PyDmSerialBus;
 #[cfg(target_os = "macos")]
 use crate::transport::PyGsUsbBus;
 #[cfg(target_os = "linux")]
@@ -36,13 +38,17 @@ fn extract_transport_handle(transport: &Bound<'_, PyAny>) -> Option<TransportHan
     if let Ok(gs_usb) = transport.extract::<PyRef<'_, PyGsUsbBus>>() {
         return Some(gs_usb.handle.clone());
     }
+    #[cfg(unix)]
+    if let Ok(dm_serial) = transport.extract::<PyRef<'_, PyDmSerialBus>>() {
+        return Some(dm_serial.handle.clone());
+    }
     None
 }
 
 #[cfg(target_os = "linux")]
-const ACCEPTED_TRANSPORTS: &str = "transport must be MockCanBus or SocketCanBus";
+const ACCEPTED_TRANSPORTS: &str = "transport must be MockCanBus, SocketCanBus or DmSerialBus";
 #[cfg(target_os = "macos")]
-const ACCEPTED_TRANSPORTS: &str = "transport must be MockCanBus or GsUsbBus";
+const ACCEPTED_TRANSPORTS: &str = "transport must be MockCanBus, GsUsbBus or DmSerialBus";
 
 /// A live view of one motor's most recent feedback.
 ///
@@ -187,7 +193,15 @@ fn parse_opening_direction(direction: &str) -> PyResult<OpeningDirection> {
 fn opening_spec(
     direction: Option<&str>,
     default_current: Option<f64>,
+    calibration_travel: Option<f64>,
 ) -> PyResult<Option<GripperOpeningSpec>> {
+    if let Some(travel) = calibration_travel {
+        if !travel.is_finite() || travel <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "calibration_travel must be finite and > 0.0, got {travel}"
+            )));
+        }
+    }
     if let Some(current) = default_current {
         if current <= 0.0 || current > 1.0 {
             return Err(PyValueError::new_err(format!(
@@ -196,13 +210,19 @@ fn opening_spec(
         }
     }
     match direction {
-        Some(direction) => Ok(Some(GripperOpeningSpec::new(
-            parse_opening_direction(direction)?,
-            default_current,
-        ))),
-        None if default_current.is_some() => Err(PyValueError::new_err(
-            "default_current requires opening_direction",
-        )),
+        Some(direction) => {
+            let spec =
+                GripperOpeningSpec::new(parse_opening_direction(direction)?, default_current);
+            Ok(Some(match calibration_travel {
+                Some(travel) => spec.with_calibration_travel(travel),
+                None => spec,
+            }))
+        }
+        None if default_current.is_some() || calibration_travel.is_some() => {
+            Err(PyValueError::new_err(
+                "default_current and calibration_travel require opening_direction",
+            ))
+        }
         None => Ok(None),
     }
 }
@@ -774,9 +794,11 @@ impl PyRobotBuilder {
 
     /// Attach a single-motor gripper named ``name`` on bus ``bus``. Optional
     /// ``opening_direction`` enables normalized opening control, and
-    /// ``default_current`` supplies its default per-unit current. Returns the
-    /// builder for chaining.
-    #[pyo3(signature = (name, *, bus, motor, opening_direction = None, default_current = None))]
+    /// ``default_current`` supplies its default per-unit current.
+    /// ``calibration_travel`` sets how far, in radians, calibration drives
+    /// toward each stop (default 4.0); set it above the full stroke. Returns
+    /// the builder for chaining.
+    #[pyo3(signature = (name, *, bus, motor, opening_direction = None, default_current = None, calibration_travel = None))]
     fn add_gripper(
         mut slf: PyRefMut<'_, Self>,
         name: &str,
@@ -784,8 +806,9 @@ impl PyRobotBuilder {
         motor: PyMotorSpec,
         opening_direction: Option<&str>,
         default_current: Option<f64>,
+        calibration_travel: Option<f64>,
     ) -> PyResult<Py<Self>> {
-        let opening = opening_spec(opening_direction, default_current)?;
+        let opening = opening_spec(opening_direction, default_current, calibration_travel)?;
         slf.groups.push(PendingGroup::Gripper(
             name.to_string(),
             bus.to_string(),

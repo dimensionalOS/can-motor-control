@@ -1,0 +1,583 @@
+//! Damiao USB-CAN serial bridge transport.
+//!
+//! The Damiao USB2CAN bridge (USB ID 2e88:4603, sold with Seeed reBot arms and
+//! other Damiao kits) enumerates as a CDC-ACM serial port instead of a
+//! SocketCAN or gs_usb device. It wraps each classical CAN frame in a fixed
+//! serial packet:
+//!
+//! - host to bridge, 30 bytes: `55 AA 1E 03`, send count (u32 LE), send
+//!   interval (u32 LE), ID type, CAN ID (u32 LE), frame type, DLC, two
+//!   reserved bytes, eight data bytes, one unused check byte.
+//! - bridge to host, 16 bytes: `AA 11 08`, CAN ID (u32 LE), eight data bytes,
+//!   `55`.
+//!
+//! This backend supports standard 11-bit data frames with exactly eight bytes.
+//! It rejects extended IDs, remote frames, other lengths and FD frames before IO.
+//! The bridge protocol also defines extended IDs, remote frames, variable lengths
+//! and a CAN-bitrate command; this backend does not implement those options.
+//! Configure the bridge CAN bitrate separately before opening it here.
+//!
+//! On a reBot arm, seven packets in one tty write lost every reply, while
+//! seven back-to-back writes lost none. This backend therefore writes packets
+//! separately as a workaround for the tested bridge firmware. A tty write does
+//! not guarantee a USB-transfer boundary; the firmware parsing mechanism has
+//! not been established. Partial writes are completed or the bus is faulted.
+
+use std::ffi::CString;
+use std::io;
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use motor_codec::{BusCapabilities, CanFrame, FrameFlags};
+
+use super::{CanBus, TransportError};
+
+const TX_PACKET_LEN: usize = 30;
+const TX_HEADER: [u8; 4] = [0x55, 0xAA, 0x1E, 0x03];
+const RX_PACKET_LEN: usize = 16;
+const RX_HEADER: [u8; 3] = [0xAA, 0x11, 0x08];
+const RX_TRAILER: u8 = 0x55;
+const PAYLOAD_LEN: usize = 8;
+const MAX_STANDARD_ID: u32 = 0x7FF;
+/// How long a send waits for room in the serial driver's write buffer.
+const SEND_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Default minimum gap between two packets written to the bridge. Separate
+/// writes need no gap; a non-zero gap trades bus bandwidth for headroom.
+pub const DEFAULT_DM_SERIAL_FRAME_GAP: Duration = Duration::ZERO;
+
+/// Largest accepted frame gap; longer gaps would stall the control loop.
+pub const MAX_DM_SERIAL_FRAME_GAP: Duration = Duration::from_secs(1);
+
+/// Encode one classical CAN frame as a bridge transmit packet.
+pub fn encode_dm_serial_packet(frame: &CanFrame) -> Result<[u8; TX_PACKET_LEN], TransportError> {
+    if frame.is_fd() {
+        return Err(TransportError::FdFrameOnNonFdBus);
+    }
+    if frame.is_extended() {
+        return Err(TransportError::ExtendedIdNotSupported);
+    }
+    if frame.flags.contains(FrameFlags::REMOTE_REQUEST) {
+        return Err(TransportError::InvalidConfiguration(
+            "the Damiao serial bridge does not send remote frames".to_string(),
+        ));
+    }
+    if frame.id > MAX_STANDARD_ID {
+        return Err(TransportError::InvalidConfiguration(format!(
+            "CAN ID {:#x} is not an 11-bit standard ID",
+            frame.id
+        )));
+    }
+    if frame.len as usize != PAYLOAD_LEN {
+        return Err(TransportError::InvalidConfiguration(format!(
+            "the Damiao serial bridge sends eight data bytes, got {}",
+            frame.len
+        )));
+    }
+    let mut packet = [0u8; TX_PACKET_LEN];
+    packet[..4].copy_from_slice(&TX_HEADER);
+    // Send once; the interval field only matters for repeated sends.
+    packet[4..8].copy_from_slice(&1u32.to_le_bytes());
+    packet[8..12].copy_from_slice(&10u32.to_le_bytes());
+    // packet[12] = 0: standard ID. packet[17] = 0: data frame.
+    packet[13..17].copy_from_slice(&frame.id.to_le_bytes());
+    packet[18] = PAYLOAD_LEN as u8;
+    packet[21..29].copy_from_slice(frame.payload());
+    Ok(packet)
+}
+
+/// Incremental parser for bridge receive packets.
+///
+/// Serial reads may split or merge packets, and the bridge may emit bytes that
+/// are not CAN frames. The parser keeps a partial packet across reads and
+/// resynchronizes one byte at a time after anything it does not recognize.
+#[derive(Default)]
+pub struct DmSerialParser {
+    buffer: Vec<u8>,
+}
+
+impl DmSerialParser {
+    /// Append received bytes and return every complete CAN frame they finish.
+    pub fn feed(&mut self, data: &[u8]) -> Vec<CanFrame> {
+        self.buffer.extend_from_slice(data);
+        let mut frames = Vec::new();
+        let mut start = 0;
+        while self.buffer.len() - start >= RX_PACKET_LEN {
+            let packet = &self.buffer[start..start + RX_PACKET_LEN];
+            if packet[..3] != RX_HEADER || packet[RX_PACKET_LEN - 1] != RX_TRAILER {
+                start += 1;
+                continue;
+            }
+            let id = u32::from_le_bytes([packet[3], packet[4], packet[5], packet[6]]);
+            if id <= MAX_STANDARD_ID {
+                frames.push(CanFrame::classical(id, &packet[7..15]).expect("eight-byte payload"));
+            }
+            start += RX_PACKET_LEN;
+        }
+        self.buffer.drain(..start);
+        frames
+    }
+
+    /// Bytes held from an incomplete packet.
+    pub fn pending_len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+/// CAN bus behind a Damiao USB-CAN serial bridge.
+pub struct DmSerialBus {
+    name: String,
+    fd: OwnedFd,
+    parser: DmSerialParser,
+    frame_gap: Duration,
+    next_write_at: Instant,
+    broken: bool,
+}
+
+impl DmSerialBus {
+    /// Open the bridge's serial device, for example `/dev/ttyACM0`.
+    ///
+    /// The port is opened exclusively in raw mode. `frame_gap` is the minimum
+    /// time between two packets written to the bridge, at most
+    /// [`MAX_DM_SERIAL_FRAME_GAP`].
+    pub fn open(path: impl AsRef<Path>, frame_gap: Duration) -> Result<Self, TransportError> {
+        let path = path.as_ref();
+        let name = path.display().to_string();
+        if frame_gap > MAX_DM_SERIAL_FRAME_GAP {
+            return Err(TransportError::InvalidConfiguration(format!(
+                "frame gap {frame_gap:?} exceeds {MAX_DM_SERIAL_FRAME_GAP:?}"
+            )));
+        }
+        let cpath = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| TransportError::InterfaceNotFound(name.clone()))?;
+        // SAFETY: open() with a valid NUL-terminated path; returns -1 on error.
+        let raw_fd = unsafe {
+            libc::open(
+                cpath.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(map_open_error(io::Error::last_os_error(), &name));
+        }
+        // SAFETY: raw_fd is a freshly opened fd; OwnedFd takes exclusive ownership.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        // A second writer would interleave packets and corrupt both streams.
+        // flock first, so a port another process holds is left untouched;
+        // then TIOCEXCL refuses later opens, even by processes that ignore
+        // advisory locks.
+        // SAFETY: flock on an owned fd.
+        if unsafe { libc::flock(raw_fd, libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(already_open(&name));
+            }
+            return Err(TransportError::Io(err));
+        }
+        // SAFETY: ioctl without an argument on an owned tty fd.
+        if unsafe { libc::ioctl(raw_fd, libc::TIOCEXCL as _) } < 0 {
+            return Err(TransportError::Io(io::Error::last_os_error()));
+        }
+        configure_raw(raw_fd)?;
+        // Drop bytes queued before this process owned the port.
+        // SAFETY: tcflush on an owned tty fd.
+        if unsafe { libc::tcflush(raw_fd, libc::TCIOFLUSH) } < 0 {
+            return Err(TransportError::Io(io::Error::last_os_error()));
+        }
+        Ok(Self {
+            name,
+            fd,
+            parser: DmSerialParser::default(),
+            frame_gap,
+            next_write_at: Instant::now(),
+            broken: false,
+        })
+    }
+
+    /// Write one whole packet, waiting for room in the driver's buffer.
+    ///
+    /// A packet the driver refuses outright leaves the stream intact and
+    /// reports `SendBufferFull`. Once part of a packet is out, any failure
+    /// leaves the stream out of step with the bridge, so the bus refuses
+    /// every later send.
+    fn write_packet(&mut self, packet: &[u8]) -> Result<(), TransportError> {
+        let mut written = 0;
+        let result = write_whole(self.fd.as_raw_fd(), packet, &mut written);
+        if result.is_err() && written > 0 {
+            self.broken = true;
+        }
+        result
+    }
+}
+
+fn write_whole(fd: RawFd, packet: &[u8], written: &mut usize) -> Result<(), TransportError> {
+    let deadline = Instant::now() + SEND_TIMEOUT;
+    while *written < packet.len() {
+        let rest = &packet[*written..];
+        // SAFETY: write() to an owned fd with a valid byte slice.
+        let n = unsafe { libc::write(fd, rest.as_ptr() as *const libc::c_void, rest.len()) };
+        if n > 0 {
+            *written += n as usize;
+            continue;
+        }
+        if n == 0 {
+            return Err(TransportError::Io(io::ErrorKind::WriteZero.into()));
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EAGAIN) => {
+                if wait_writable(fd, deadline)? {
+                    continue;
+                }
+                return Err(if *written == 0 {
+                    TransportError::SendBufferFull
+                } else {
+                    TransportError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "packet left half written",
+                    ))
+                });
+            }
+            _ => return Err(TransportError::Io(err)),
+        }
+    }
+    Ok(())
+}
+
+/// Wait until `fd` accepts writes; false once `deadline` passes.
+fn wait_writable(fd: RawFd, deadline: Instant) -> Result<bool, TransportError> {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let millis = (deadline - now).as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+        // SAFETY: poll on one valid pollfd for the duration of the call.
+        let rc = unsafe { libc::poll(&mut pollfd, 1, millis) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(TransportError::Io(err));
+        }
+        if rc == 0 {
+            return Ok(false);
+        }
+        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "serial device hung up",
+            )));
+        }
+        return Ok(pollfd.revents & libc::POLLOUT != 0);
+    }
+}
+
+fn already_open(name: &str) -> TransportError {
+    TransportError::InvalidConfiguration(format!("{name} is already open in another process"))
+}
+
+fn configure_raw(fd: RawFd) -> Result<(), TransportError> {
+    let mut termios = MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: tcgetattr fills the termios struct on success.
+    if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } < 0 {
+        return Err(TransportError::Io(io::Error::last_os_error()));
+    }
+    // SAFETY: initialized by the successful tcgetattr above.
+    let mut termios = unsafe { termios.assume_init() };
+    // SAFETY: cfmakeraw only edits the struct.
+    unsafe { libc::cfmakeraw(&mut termios) };
+    termios.c_cflag |= libc::CLOCAL | libc::CREAD;
+    // CDC-ACM ignores the line rate; set the vendor's 921600 where the
+    // platform defines it so a UART-attached bridge also works.
+    #[cfg(target_os = "linux")]
+    // SAFETY: cfsetspeed only edits the struct.
+    unsafe {
+        libc::cfsetspeed(&mut termios, libc::B921600);
+    }
+    // SAFETY: tcsetattr with a valid termios struct.
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
+        return Err(TransportError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn map_open_error(e: io::Error, name: &str) -> TransportError {
+    match e.raw_os_error() {
+        // TIOCEXCL set by the process that holds the port.
+        Some(libc::EBUSY) => already_open(name),
+        Some(libc::EACCES) | Some(libc::EPERM) => TransportError::PermissionDenied,
+        Some(libc::ENOENT) | Some(libc::ENODEV) | Some(libc::ENXIO) => {
+            TransportError::InterfaceNotFound(name.to_string())
+        }
+        _ => TransportError::Io(e),
+    }
+}
+
+impl CanBus for DmSerialBus {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn capabilities(&self) -> BusCapabilities {
+        BusCapabilities::classical()
+    }
+
+    fn send(&mut self, frame: &CanFrame) -> Result<(), TransportError> {
+        let packet = encode_dm_serial_packet(frame)?;
+        if self.broken {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{}: stream out of step after a partial packet", self.name),
+            )));
+        }
+        let now = Instant::now();
+        if now < self.next_write_at {
+            thread::sleep(self.next_write_at - now);
+        }
+        self.write_packet(&packet)?;
+        self.next_write_at = Instant::now() + self.frame_gap;
+        Ok(())
+    }
+
+    fn drain_inbound_nonblocking(&mut self) -> Result<Vec<CanFrame>, TransportError> {
+        let raw = self.fd.as_raw_fd();
+        let mut frames = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            // SAFETY: read() into an owned buffer of the given length.
+            let n = unsafe { libc::read(raw, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n > 0 {
+                frames.extend(self.parser.feed(&buf[..n as usize]));
+                continue;
+            }
+            if n == 0 {
+                // A zero-byte read on a non-blocking tty means the device hung up.
+                return Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("{} closed", self.name),
+                )));
+            }
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EAGAIN) => return Ok(frames),
+                Some(libc::EINTR) => continue,
+                _ => return Err(TransportError::Io(err)),
+            }
+        }
+    }
+
+    fn raw_fd(&self) -> Option<RawFd> {
+        Some(self.fd.as_raw_fd())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rx_packet(id: u32, data: [u8; 8]) -> Vec<u8> {
+        let mut packet = RX_HEADER.to_vec();
+        packet.extend_from_slice(&id.to_le_bytes());
+        packet.extend_from_slice(&data);
+        packet.push(RX_TRAILER);
+        packet
+    }
+
+    #[test]
+    fn encodes_standard_frame() {
+        let frame = CanFrame::classical(0x101, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let packet = encode_dm_serial_packet(&frame).unwrap();
+        assert_eq!(&packet[..4], &TX_HEADER);
+        assert_eq!(&packet[4..8], &1u32.to_le_bytes());
+        assert_eq!(&packet[8..12], &10u32.to_le_bytes());
+        assert_eq!(packet[12], 0);
+        assert_eq!(&packet[13..17], &0x101u32.to_le_bytes());
+        assert_eq!(packet[17], 0);
+        assert_eq!(packet[18], 8);
+        assert_eq!(&packet[21..29], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(packet[29], 0);
+    }
+
+    #[test]
+    fn rejects_frames_the_bridge_cannot_carry() {
+        let short = CanFrame::classical(0x01, &[0xFF; 4]).unwrap();
+        assert!(matches!(
+            encode_dm_serial_packet(&short),
+            Err(TransportError::InvalidConfiguration(_))
+        ));
+        let extended = CanFrame::classical_extended(0x01, &[0; 8]).unwrap();
+        assert!(matches!(
+            encode_dm_serial_packet(&extended),
+            Err(TransportError::ExtendedIdNotSupported)
+        ));
+        let fd = CanFrame::fd(0x01, &[0; 8]).unwrap();
+        assert!(matches!(
+            encode_dm_serial_packet(&fd),
+            Err(TransportError::FdFrameOnNonFdBus)
+        ));
+    }
+
+    #[test]
+    fn parses_split_and_merged_packets() {
+        let mut parser = DmSerialParser::default();
+        let mut bytes = rx_packet(0x11, [1; 8]);
+        bytes.extend(rx_packet(0x12, [2; 8]));
+        assert!(parser.feed(&bytes[..10]).is_empty());
+        let frames = parser.feed(&bytes[10..]);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].id, 0x11);
+        assert_eq!(frames[0].payload(), &[1; 8]);
+        assert_eq!(frames[1].id, 0x12);
+        assert_eq!(parser.pending_len(), 0);
+    }
+
+    #[test]
+    fn resynchronizes_after_noise() {
+        let mut parser = DmSerialParser::default();
+        let mut bytes = vec![0x00, 0xAA, 0x55, 0xAA, 0x11];
+        bytes.extend(rx_packet(0x17, [7; 8]));
+        let frames = parser.feed(&bytes);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].id, 0x17);
+        assert_eq!(parser.pending_len(), 0);
+    }
+
+    #[test]
+    fn drops_ids_outside_the_standard_range() {
+        let mut parser = DmSerialParser::default();
+        assert!(parser.feed(&rx_packet(0x800, [0; 8])).is_empty());
+        assert_eq!(parser.pending_len(), 0);
+    }
+
+    /// A pseudo-terminal master and the path of its slave, standing in for
+    /// the bridge's serial port.
+    fn pseudo_terminal() -> (OwnedFd, String) {
+        // SAFETY: standard pseudo-terminal setup on a fresh master fd.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        assert!(master >= 0);
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        unsafe {
+            assert_eq!(libc::grantpt(master.as_raw_fd()), 0);
+            assert_eq!(libc::unlockpt(master.as_raw_fd()), 0);
+        }
+        let slave = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(master.as_raw_fd())) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        (master, slave)
+    }
+
+    #[test]
+    fn second_open_of_the_same_port_is_refused() {
+        let (_master, slave) = pseudo_terminal();
+        let _bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
+        assert!(matches!(
+            DmSerialBus::open(&slave, Duration::ZERO),
+            Err(TransportError::InvalidConfiguration(message)) if message.contains("already open")
+        ));
+        // TIOCEXCL also refuses a plain open that ignores advisory locks.
+        // Root bypasses TIOCEXCL, so only check this unprivileged. Only Linux
+        // reports it as EBUSY on a pseudo-terminal; macOS answers EAGAIN there
+        // with or without TIOCEXCL, so the errno cannot tell them apart.
+        // SAFETY: geteuid has no preconditions.
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::geteuid() } != 0 {
+            let cpath = CString::new(slave).unwrap();
+            // SAFETY: open() with a valid NUL-terminated path.
+            let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+            let err = io::Error::last_os_error();
+            if fd >= 0 {
+                // SAFETY: closing the fd this test just opened.
+                unsafe { libc::close(fd) };
+            }
+            assert!(
+                fd < 0 && err.raw_os_error() == Some(libc::EBUSY),
+                "plain open: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_frame_gap_beyond_the_maximum() {
+        let (_master, slave) = pseudo_terminal();
+        assert!(matches!(
+            DmSerialBus::open(&slave, MAX_DM_SERIAL_FRAME_GAP + Duration::from_nanos(1)),
+            Err(TransportError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn hang_up_surfaces_as_a_transport_error() {
+        let (master, slave) = pseudo_terminal();
+        let mut bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
+        drop(master);
+        assert!(matches!(
+            bus.drain_inbound_nonblocking(),
+            Err(TransportError::Io(_))
+        ));
+        let frame = CanFrame::classical(0x01, &[0; 8]).unwrap();
+        assert!(bus.send(&frame).is_err());
+    }
+
+    #[test]
+    fn exchanges_packets_over_a_pseudo_terminal() {
+        let (master, slave) = pseudo_terminal();
+        let mut bus = DmSerialBus::open(&slave, Duration::ZERO).unwrap();
+        let frame = CanFrame::classical(0x7FF, &[1, 0, 0xCC, 0, 0, 0, 0, 0]).unwrap();
+        bus.send(&frame).unwrap();
+        let mut sent = [0u8; TX_PACKET_LEN];
+        let mut got = 0;
+        while got < TX_PACKET_LEN {
+            let mut pollfd = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll on one valid pollfd; fail instead of hanging.
+            assert_eq!(unsafe { libc::poll(&mut pollfd, 1, 1000) }, 1, "no packet");
+            // SAFETY: read() into the unfilled tail of a local buffer.
+            let n = unsafe {
+                libc::read(
+                    master.as_raw_fd(),
+                    sent[got..].as_mut_ptr() as *mut libc::c_void,
+                    TX_PACKET_LEN - got,
+                )
+            };
+            assert!(n > 0, "pty read failed");
+            got += n as usize;
+        }
+        assert_eq!(sent, encode_dm_serial_packet(&frame).unwrap());
+
+        let reply = rx_packet(0x11, [0x11, 0x80, 0x00, 0x80, 0x08, 0x00, 30, 31]);
+        // SAFETY: write() of a local buffer to the owned master fd.
+        let n = unsafe {
+            libc::write(
+                master.as_raw_fd(),
+                reply.as_ptr() as *const libc::c_void,
+                reply.len(),
+            )
+        };
+        assert_eq!(n as usize, reply.len());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut frames = Vec::new();
+        while frames.is_empty() && Instant::now() < deadline {
+            frames = bus.drain_inbound_nonblocking().unwrap();
+        }
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].id, 0x11);
+        assert_eq!(frames[0].payload()[6], 30);
+    }
+}
