@@ -486,8 +486,11 @@ mod tests {
             Err(TransportError::InvalidConfiguration(message)) if message.contains("already open")
         ));
         // TIOCEXCL also refuses a plain open that ignores advisory locks.
-        // Root bypasses TIOCEXCL, so only check this unprivileged.
+        // Root bypasses TIOCEXCL, so only check this unprivileged. Only Linux
+        // reports it as EBUSY on a pseudo-terminal; macOS answers EAGAIN there
+        // with or without TIOCEXCL, so the errno cannot tell them apart.
         // SAFETY: geteuid has no preconditions.
+        #[cfg(target_os = "linux")]
         if unsafe { libc::geteuid() } != 0 {
             let cpath = CString::new(slave).unwrap();
             // SAFETY: open() with a valid NUL-terminated path.
